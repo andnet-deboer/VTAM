@@ -8,3 +8,15 @@ Visuo-Tactile Assistive Manipulation
 
 Andnet DeBoer
 </div>
+
+build docker
+```
+docker build -t stretch-ai-gpu .
+```
+run docker
+```
+docker run --gpus all -it --network=host stretch-ai-gpu
+```
+```
+docker run --gpus all -it --network=host -v ~/stretch-ai-workdir:/workspace stretch-ai-gpu:ready /bin/bash
+```
