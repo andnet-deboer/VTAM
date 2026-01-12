@@ -1,0 +1,9 @@
+site_name: Visuo-Tactile Assistive Manipulation
+theme:
+  name: material
+nav:
+  - Home: index.md
+  - Hardware: hardware.md
+  - Software: software.md
+  - Experiments: experiments.md
+  - References: references.md
