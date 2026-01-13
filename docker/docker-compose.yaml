@@ -1,0 +1,18 @@
+services:
+  vtam-dev:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: vtam_platform:latest
+    container_name: vtam_dev
+    # Hardware access (USB/Serial)
+    privileged: true
+    network_mode: host
+    volumes:
+      # Mount vtam_core
+      - ../ros_ws:/root/vtam_ws
+      # Mount data folder so logs survive container restarts
+      - ../data:/root/vtam_ws/data
+      # Mount hardware devices
+      - /dev:/dev
+    command: sleep infinity
