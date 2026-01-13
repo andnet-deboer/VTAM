@@ -15,4 +15,6 @@ services:
       - ../data:/root/vtam_ws/data
       # Mount hardware devices
       - /dev:/dev
+      # Check for updates on stretch_ai fork
+      - ../dependencies/stretch_ai:/opt/stretch_ai
     command: sleep infinity
