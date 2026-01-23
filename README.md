@@ -37,3 +37,19 @@ VTAM/
 │   └── stretch_ai/         # Forked Hello Robot drivers
 ├── training/               # ML Training Stack (PyTorch/LeRobot)
 └── hardware/               # Firmware for custom sensors (QT py)
+
+
+# Build stretch_description Symlink 
+cd ros_ws/src
+ln -s ../../dependencies/stretch_ros2/stretch_description .
+
+#### Check the Link
+ls -la stretch_description 
+
+cd ..
+
+ls -l /dev/serial/by-path/
+
+sudo apt install python3-serial
+
+pip3 install --user anyskin --break-system-packages
