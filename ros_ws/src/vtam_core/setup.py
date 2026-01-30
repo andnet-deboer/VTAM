@@ -24,11 +24,14 @@ setup(
     maintainer_email='todo@todo.com',
     description='VTAM - Visuo-Tactile Assistive Manipulation',
     license='Apache-2.0',
-    tests_require=['pytest'],
     entry_points={
         'console_scripts': [
             'eflesh_node = vtam_core.eflesh_node:main',
-            'viz_node = vtam_core.viz_node:main'
+            'viz_node = vtam_core.viz_node:main',
+            'umi_gripper_node = vtam_core.umi_gripper_node:main',
+            'eflesh_debug_node = vtam_core.eflesh_debug_node:main',
+            'umi_pose_tracker = vtam_core.umi_pose_tracker:main',
+            'umi_node = vtam_core.umi_node:main'
         ],
     },
 )
