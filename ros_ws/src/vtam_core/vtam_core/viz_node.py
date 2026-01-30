@@ -16,16 +16,23 @@ class TactileVizNode(Node):
         self.declare_parameter('max_pressure', 400.0) # Adjust sensitivity here
         self.max_pressure = self.get_parameter('max_pressure').value
 
+        self.bridge = CvBridge()
+
         # --- Subscribers ---
+        # Left
         self.sub_left = self.create_subscription(
             Float32MultiArray, '/tactile_left', self.left_callback, 10)
+        # Right (New)
+        self.sub_right = self.create_subscription(
+            Float32MultiArray, '/tactile_right', self.right_callback, 10)
 
         # --- Publishers (Output Images) ---
+        # Left
         self.pub_left_img = self.create_publisher(Image, '/viz/tactile_left', 10)
+        # Right (New)
+        self.pub_right_img = self.create_publisher(Image, '/viz/tactile_right', 10)
         
-        self.bridge = CvBridge()
-        
-        # Chip locations (approximate pixel coordinates for 300x400 image)
+        # Chip locations (approximate pixel coordinates for 300x300 image)
         # [x, y]
         self.locations = np.array([
             [150, 150], # Center
@@ -36,8 +43,8 @@ class TactileVizNode(Node):
         ])
 
     def draw_heatmap(self, data_flat):
-        # Create a black background (300x400)
-        img = np.ones((300, 300, 3), dtype=np.uint8)
+        # Create a black background (300x300)
+        img = np.zeros((300, 300, 3), dtype=np.uint8)
         
         # Reshape to (5 sensors, 3 axes)
         if len(data_flat) != 15: return img
@@ -72,18 +79,29 @@ class TactileVizNode(Node):
     def left_callback(self, msg):
         # 1. Generate Image
         cv_image = self.draw_heatmap(msg.data)
-        
+        # 2. Convert to ROS Msg
         ros_msg = self.bridge.cv2_to_imgmsg(cv_image, encoding="bgr8")
-        
-        # Publish
+        # 3. Publish
         self.pub_left_img.publish(ros_msg)
+
+    def right_callback(self, msg):
+        # 1. Generate Image
+        cv_image = self.draw_heatmap(msg.data)
+        # 2. Convert to ROS Msg
+        ros_msg = self.bridge.cv2_to_imgmsg(cv_image, encoding="bgr8")
+        # 3. Publish
+        self.pub_right_img.publish(ros_msg)
 
 def main(args=None):
     rclpy.init(args=args)
     node = TactileVizNode()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
