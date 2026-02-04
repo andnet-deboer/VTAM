@@ -53,3 +53,9 @@ ls -l /dev/serial/by-path/
 sudo apt install python3-serial
 
 pip3 install --user anyskin --break-system-packages
+
+
+ros2 run vtam_core record_node --ros-args -p demo_name:=wipetable_demo
+
+
+ros2 service call /record_demo std_srvs/srv/SetBool "{data: True}"
