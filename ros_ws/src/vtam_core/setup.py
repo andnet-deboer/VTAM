@@ -31,7 +31,8 @@ setup(
             'umi_gripper_node = vtam_core.umi_gripper_node:main',
             'eflesh_debug_node = vtam_core.eflesh_debug_node:main',
             'umi_pose_tracker = vtam_core.umi_pose_tracker:main',
-            'umi_node = vtam_core.umi_node:main'
+            'umi_node = vtam_core.umi_node:main',
+            'record_node = vtam_core.record_node:main'
         ],
     },
 )
