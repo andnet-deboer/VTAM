@@ -1,0 +1,22 @@
+apriltag:
+  ros__parameters:
+    image_transport: raw    # Intra-process requires 'raw'
+    family: 36h11           # Standard family
+    size: 0.07              # 7cm (Your cube size)
+    max_hamming: 0          # 0 errors allowed (Strict for precision)
+    z_up: true              # Point Z up from the tag
+
+    # Speed tuning for 90Hz
+    detector:
+      threads: 4            # Use 4 cores
+      decimate: 2.0         # Lower res for speed (1.0 = full res, slower)
+      blur: 0.0
+      refine: 1
+      sharpening: 0.25
+      debug: 0
+
+    # Define the 6 tags on your cube
+    tag:
+      ids: [0, 1, 2, 3, 4, 5]
+      frames: [umi_0, umi_1, umi_2, umi_3, umi_4, umi_5]
+      sizes: [0.07, 0.07, 0.07, 0.07, 0.07, 0.07]
