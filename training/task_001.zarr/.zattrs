@@ -1,0 +1,12 @@
+{
+    "fps": 14.944267693694885,
+    "joint_names": [
+        "joint_mobile_base_rotation",
+        "joint_lift",
+        "joint_arm_l0",
+        "joint_wrist_yaw",
+        "joint_wrist_pitch",
+        "joint_wrist_roll",
+        "joint_mobile_base_translation"
+    ]
+}
