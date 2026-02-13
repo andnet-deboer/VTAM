@@ -17,6 +17,8 @@ setup(
         (os.path.join('share', package_name, 'launch'), glob('launch/*.py')),
         # Install rviz config
         (os.path.join('share', package_name, 'rviz'), glob('rviz/*.rviz')),
+        # Install yaml configs
+        (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -32,7 +34,8 @@ setup(
             'eflesh_debug_node = vtam_core.eflesh_debug_node:main',
             'umi_pose_tracker = vtam_core.umi_pose_tracker:main',
             'umi_node = vtam_core.umi_node:main',
-            'record_node = vtam_core.record_node:main'
+            'record_node = vtam_core.record_node:main',
+            'umi_detector_node = vtam_core.umi_detector_node:main'
         ],
     },
 )
