@@ -28,11 +28,12 @@ setup(
     license='Apache-2.0',
     entry_points={
         'console_scripts': [
-            'eflesh_node = vtam_core.eflesh_node:main',
+            'vtam_robot_node = vtam_core.robot_node:main',
+            'main_node = vtam_core.main_node:main',
             'viz_node = vtam_core.viz_node:main',
             'umi_gripper_node = vtam_core.umi_gripper_node:main',
+            'eflesh_node = vtam_core.eflesh_node:main',
             'eflesh_debug_node = vtam_core.eflesh_debug_node:main',
-            'umi_pose_tracker = vtam_core.umi_pose_tracker:main',
             'umi_node = vtam_core.umi_node:main',
             'record_node = vtam_core.record_node:main',
             'umi_detector_node = vtam_core.umi_detector_node:main'

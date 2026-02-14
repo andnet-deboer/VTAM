@@ -107,12 +107,8 @@ class UmiDetectorNode(Node):
         package_share = get_package_share_directory('vtam_core')
         yaml_path = os.path.join(package_share, 'config', 'teleop_april_marker_info_86mm.yaml')
 
-        try:
-            with open(yaml_path, 'r') as f:
-                self.marker_info = yaml.safe_load(f)
-        except FileNotFoundError:
-            self.get_logger().error(f"Could not find config at {yaml_path}")
-            self.marker_info = {}
+        with open(yaml_path, 'r') as f:        
+            self.marker_info = yaml.safe_load(f) 
 
         # Parameters
         self.declare_parameter('pos_min_cutoff', 0.9)
@@ -127,18 +123,15 @@ class UmiDetectorNode(Node):
         self.quat_filter = OneEuroFilter(30.0, self.get_parameter('quat_min_cutoff').value, self.get_parameter('quat_beta').value)
         self.add_on_set_parameters_callback(self.param_cb)
         
-        try:
-            with open('teleop_april_marker_info_86mm.yaml', 'r') as f:
-                self.marker_info = yaml.safe_load(f)
-        except:
-            self.marker_info = {}
+        # Declare the parameter with a default value
+        self.declare_parameter('camera_optical_frame', 'camera_color_optical_frame')
 
         self.dictionary = aruco.getPredefinedDictionary(aruco.DICT_APRILTAG_36h11)
         self.detector = aruco.ArucoDetector(self.dictionary, aruco.DetectorParameters())
         self.collection, self.camera_info_dict, self.prev_cube_pose = {}, None, None
         
-        self.create_subscription(CameraInfo, '/camera_head/camera/color/camera_info', self.info_cb, 10)
-        self.create_subscription(Image, '/camera_head/camera_head/color/image_raw', self.image_cb, 10)
+        self.create_subscription(CameraInfo, 'camera/color/camera_info', self.info_cb, 10)
+        self.create_subscription(Image, 'camera/color/image_raw', self.image_cb, 10)
 
     def param_cb(self, params):
         for p in params:
@@ -176,13 +169,13 @@ class UmiDetectorNode(Node):
             f_quat_cam = average_quaternions([c['quat'] for c in cube_candidates], weights/sum(weights))
             
             try:
-                # Use rclpy.time.Time() to grab the absolute latest data available
+                target_frame = self.get_parameter('camera_optical_frame').get_parameter_value().string_value
+                
                 t = self.tf_buffer.lookup_transform(
                     'base_link', 
-                    'camera_color_optical_frame', 
-                    rclpy.time.Time() 
+                    target_frame, 
+                    rclpy.time.Time(seconds=0) 
                 )
-                
                 # Position: Places the cube in the world based on the latest camera pose
                 R_base_cam = R_scipy.from_quat([t.transform.rotation.x, t.transform.rotation.y, t.transform.rotation.z, t.transform.rotation.w])
                 T_base_cam = np.array([t.transform.translation.x, t.transform.translation.y, t.transform.translation.z])
