@@ -103,16 +103,19 @@ class EFleshNode(Node):
             self.stream_umi.join()
         super().destroy_node()
 
-def main(args=None):
-    rclpy.init(args=args)
+def main():
+    rclpy.init()
     node = EFleshNode()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        pass
+        pass  # Let the signal handler deal with it
+    except Exception as e:
+        node.get_logger().error(f'Error: {e}')
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        # Only shutdown if not already shut down
+        if rclpy.ok():
+            rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

@@ -94,8 +94,8 @@ class RecordDemoNode(Node):
 
                 topics = [
                     "/joint_states", "/tf", "/tf_static", "/umi_cube_pose",
-                    "/camera/camera/color/image_raw/compressed", "/camera/camera/color/camera_info",
-                    "/gripper_camera/color/image_rect_raw/compressed", "/gripper_camera/color/camera_info",
+                    "/camera/color/image_raw/compressed", "/camera/color/camera_info",
+                    "/camera_arm/color/image_rect_raw/compressed", "/camera_arm/color/camera_info",
                     "/any_skin/data"
                 ]
 

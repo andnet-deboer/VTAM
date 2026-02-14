@@ -31,12 +31,13 @@ setup(
             'vtam_robot_node = vtam_core.robot_node:main',
             'main_node = vtam_core.main_node:main',
             'viz_node = vtam_core.viz_node:main',
-            'umi_gripper_node = vtam_core.umi_gripper_node:main',
+            # 'umi_gripper_node = vtam_core.umi_gripper_node:main',
             'eflesh_node = vtam_core.eflesh_node:main',
             'eflesh_debug_node = vtam_core.eflesh_debug_node:main',
             'umi_node = vtam_core.umi_node:main',
             'record_node = vtam_core.record_node:main',
-            'umi_detector_node = vtam_core.umi_detector_node:main'
+            'umi_detector_node = vtam_core.umi_detector_node:main',
+            'streaming_test_node = vtam_core.streaming_test_node:main',
         ],
     },
 )

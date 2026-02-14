@@ -1,150 +1,164 @@
 #!/usr/bin/env python3
-"""
-VTAM Robot Node — Acts as the primary driver.
-Publishes /joint_states so robot_state_publisher can update TF.
-"""
-
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
+from tf2_ros import TransformListener, Buffer, TransformBroadcaster
+from geometry_msgs.msg import TransformStamped
 import stretch_body.robot as rb
-import signal
 import time
-from tf2_ros import Buffer, TransformListener
-
-# Import behaviors
-from vtam_core.umi_pose_tracker import HeadTrackerNode
+from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
 from vtam_core.umi_gripper_node import GripperController
 
-class RobotNode(Node):
+# Add these imports
+try:
+    from tf_transformations import quaternion_multiply, quaternion_from_euler
+except ImportError:
+    from scipy.spatial.transform import Rotation as R
+    def quaternion_from_euler(roll, pitch, yaw):
+        r = R.from_euler('xyz', [roll, pitch, yaw])
+        return r.as_quat()
+    def quaternion_multiply(q1, q2):
+        r1 = R.from_quat(q1)
+        r2 = R.from_quat(q2)
+        return (r1 * r2).as_quat()
+
+class VtamControlLoop(Node):
     def __init__(self):
-        super().__init__('vtam_robot_node')
+        super().__init__('vtam_control_loop')
+        
+        self.get_logger().info('Initializing VTAM Control Loop...')
+        
+        # 1. Hardware
+        try:
+            self.robot = rb.Robot()
+            self.robot.startup()
+            self.get_logger().info('Stretch robot connected successfully')
+        except Exception as e:
+            self.get_logger().error(f'Failed to connect to robot: {e}')
+            raise
 
-        # ─── 1. Hardware Interface ───
-        self.get_logger().info("Starting Stretch hardware...")
-        self.robot = rb.Robot()
-        if not self.robot.startup():
-            self.get_logger().error("Robot startup failed!")
-            raise RuntimeError("Robot startup failed")
-        self.get_logger().info("Stretch hardware OK")
-
-        # ─── 2. TF & Joint State Setup ───
+        # 2. TF Infrastructure
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.tf_broadcaster = TransformBroadcaster(self)
+
+        # 3. State Tracking for "Locked" Pose
+        self.locked_pose = None
+        self.last_warning_time = 0
+
+        self.gripper_controller = GripperController(self, self.robot)
         
-        # CRITICAL: We must publish joint states for TF to work
-        self.js_pub = self.create_publisher(JointState, '/joint_states', 60)
+        self.js_pub = self.create_publisher(JointState, '/joint_states', 10)
+        self.create_timer(0.02, self.control_tick)
+        
+        self.get_logger().info('VTAM Control Loop ready')
 
-        # ─── 3. Attach Behaviors ───
-        self.head_tracker = HeadTrackerNode(self, self.robot)
-        self.gripper = GripperController(self, self.robot)
-
-        # ─── 4. Loops ───
-        self.create_timer(0.02, self._tick)  # 50Hz Control Loop
-
-        # ─── 5. Cleanup ───
-        signal.signal(signal.SIGINT, self._signal_handler)
-        signal.signal(signal.SIGTERM, self._signal_handler)
-        self._shutting_down = False
-
-        self.get_logger().info("VTAM Robot Node ready (Driver Mode)")
-
-    def _tick(self):
-        if self._shutting_down: return
-
-        # 1. Read Hardware
+    def control_tick(self):
         self.robot.pull_status()
-
-        # 2. Update Behaviors
-        self.head_tracker.tick()
-        self.gripper.tick()
-
-        # 3. Publish State (So TF works)
-        self._publish_joint_states()
-
-        # 4. Write Hardware
-        self.robot.push_command()
-
-    def _publish_joint_states(self):
-        """
-        Maps stretch_body status to ROS JointState.
-        Essential for robot_state_publisher to link base_link -> camera.
-        """
-        js = JointState()
-        js.header.stamp = self.get_clock().now().to_msg()
         
-        # Helper to safely get position
-        def get_pos(joint_name, status_dict):
-            try:
-                return float(status_dict[joint_name]['pos'])
-            except (KeyError, TypeError):
-                return 0.0
+        # Attempt to capture the UMI handle pose from the detector
+        try:
+            t = self.tf_buffer.lookup_transform(
+                'base_link', 
+                'umi_disconnect', 
+                rclpy.time.Time(),
+                timeout=rclpy.duration.Duration(seconds=0.1)
+            )
 
-        # --- HEAD ---
-        # Note: stretch_body puts these in robot.head.status
-        if 'head' in self.robot.status:
-            js.name.extend(['joint_head_pan', 'joint_head_tilt'])
-            js.position.extend([
-                get_pos('head_pan', self.robot.status['head']),
-                get_pos('head_tilt', self.robot.status['head'])
-            ])
+            rotation_quat = quaternion_from_euler(0.424, -0.556, -0.513)
+            current_quat = (
+                t.transform.rotation.x, 
+                t.transform.rotation.y, 
+                t.transform.rotation.z, 
+                t.transform.rotation.w
+            )
+            new_quat = quaternion_multiply(current_quat, rotation_quat)
+            # Apply 180-degree rotation around z-axis and 180-degree roll
+            z_180_quat = quaternion_from_euler(0, 0, 3.14159)
+            new_quat = quaternion_multiply(new_quat, z_180_quat)
+            roll_180_quat = quaternion_from_euler(0, 3.14159, 0)
+            new_quat = quaternion_multiply(new_quat, roll_180_quat)
+            t.transform.rotation.x = new_quat[0]
+            t.transform.rotation.y = new_quat[1]
+            t.transform.rotation.z = new_quat[2]
+            t.transform.rotation.w = new_quat[3]
+            self.locked_pose = t
+        except (LookupException, ConnectivityException, ExtrapolationException) as e:
+            # Only warn occasionally to avoid log spam
+            current_time = time.time()
+            if current_time - self.last_warning_time > 5.0:
+                self.get_logger().debug(f'Waiting for UMI detection: {e}')
+                self.last_warning_time = current_time
 
-        # --- LIFT ---
-        if 'lift' in self.robot.status:
-            js.name.append('joint_lift')
-            js.position.append(get_pos('pos', self.robot.status['lift']))
+        # Broadcast the dynamic gripper body
+        self.broadcast_virtual_gripper()
+        self.gripper_controller.tick()
+        
+        self.robot.push_command()
+        self.publish_js()
 
-        # --- ARM (Telescoping Split) ---
-        # The URDF has 4 links (l0..l3). We divide total extension by 4.
-        if 'arm' in self.robot.status:
-            arm_total = self.robot.status['arm']['pos']
-            segment_pos = arm_total / 4.0
-            for i in range(4):
-                js.name.append(f'joint_arm_l{i}')
-                js.position.append(segment_pos)
+    def broadcast_virtual_gripper(self):
+        """
+        Broadcasts link_gripper_s3_body. 
+        If UMI is found, it stays at the cube handle.
+        If never found, it defaults to the physical wrist.
+        """
+        t = TransformStamped()
+        t.header.stamp = self.get_clock().now().to_msg()
+        t.child_frame_id = 'link_gripper_s3_body'
 
-        # --- WRIST & GRIPPER ---
-        if 'end_of_arm' in self.robot.status:
-            eoa = self.robot.status['end_of_arm']
-            
-            # Yaw
-            js.name.append('joint_wrist_yaw')
-            js.position.append(get_pos('wrist_yaw', eoa))
-            
-            # Pitch/Roll (if DexWrist)
-            if 'wrist_pitch' in eoa:
-                js.name.append('joint_wrist_pitch')
-                js.position.append(get_pos('wrist_pitch', eoa))
-            if 'wrist_roll' in eoa:
-                js.name.append('joint_wrist_roll')
-                js.position.append(get_pos('wrist_roll', eoa))
+        if self.locked_pose is not None:
+            # Use the locked UMI pose
+            t.header.frame_id = 'base_link'
+            t.transform = self.locked_pose.transform
+        else:
+            # Fallback: Attach to the physical wrist roll until first detection
+            t.header.frame_id = 'link_wrist_roll'
+            t.transform.rotation.w = 1.0
 
-            # Gripper (Map to both fingers)
-            # stretch_body usually gives raw radians in 'pos' for gripper
-            grip_pos = get_pos('stretch_gripper', eoa)
-            js.name.extend(['joint_gripper_finger_left', 'joint_gripper_finger_right'])
-            js.position.extend([grip_pos, grip_pos])
+        self.tf_broadcaster.sendTransform(t)
 
-        self.js_pub.publish(js)
-
-    def _signal_handler(self, sig, frame):
-        self.stop()
-        raise KeyboardInterrupt
-
-    def stop(self):
-        self._shutting_down = True
-        time.sleep(0.1)
-        try: self.robot.stop()
-        except: pass
+    def publish_js(self):
+        msg = JointState()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.name = [
+            'joint_head_pan', 'joint_head_tilt', 'joint_lift', 
+            'joint_arm_l0', 'joint_arm_l1', 'joint_arm_l2', 'joint_arm_l3',
+            'joint_wrist_yaw', 'joint_wrist_pitch', 'joint_wrist_roll',
+            'joint_gripper_finger_left', 'joint_gripper_finger_right'
+        ]
+        
+        h = self.robot.head.status
+        a = self.robot.arm.status
+        l = self.robot.lift.status
+        w = self.robot.end_of_arm.status
+        
+        arm_p = a['pos']
+        msg.position = [
+            float(h['head_pan']['pos']), float(h['head_tilt']['pos']), float(l['pos']),
+            float(arm_p/4), float(arm_p/4), float(arm_p/4), float(arm_p/4),
+            float(w['wrist_yaw']['pos']), float(w['wrist_pitch']['pos']), 
+            float(w['wrist_roll']['pos']),
+            float(w['stretch_gripper']['pos']), float(w['stretch_gripper']['pos'])
+        ]
+        self.js_pub.publish(msg)
+    
+    def shutdown(self):
+        """Clean shutdown"""
+        self.get_logger().info('Shutting down robot...')
+        try:
+            self.robot.stop()
+        except Exception as e:
+            self.get_logger().error(f'Error during robot shutdown: {e}')
 
 def main():
     rclpy.init()
-    node = RobotNode()
-    try: rclpy.spin(node)
-    except KeyboardInterrupt: pass
+    node = VtamControlLoop()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
     finally:
-        node.stop()
-        rclpy.shutdown()
-
-if __name__ == '__main__':
-    main()
+        node.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()

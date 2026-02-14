@@ -18,6 +18,7 @@ from scipy.spatial.transform import Rotation as R_scipy
 from rclpy.duration import Duration
 import os
 from ament_index_python.packages import get_package_share_directory
+from rclpy.time import Time
 
 class OneEuroFilter:
     def __init__(self, freq, min_cutoff=1.0, beta=0.0, d_cutoff=1.0):
@@ -103,6 +104,10 @@ class UmiDetectorNode(Node):
         self.pose_pub = self.create_publisher(PoseStamped, 'umi_cube_pose', 10)
         self.gripper_pub = self.create_publisher(PoseStamped, 'umi_gripper_pose', 10)
 
+        # Track startup time to suppress warnings during TF buffer warmup
+        self.startup_time = self.get_clock().now()
+        self.tf_ready = False
+
         # Load yaml
         package_share = get_package_share_directory('vtam_core')
         yaml_path = os.path.join(package_share, 'config', 'teleop_april_marker_info_86mm.yaml')
@@ -169,13 +174,13 @@ class UmiDetectorNode(Node):
             f_quat_cam = average_quaternions([c['quat'] for c in cube_candidates], weights/sum(weights))
             
             try:
-                target_frame = self.get_parameter('camera_optical_frame').get_parameter_value().string_value
-                
                 t = self.tf_buffer.lookup_transform(
                     'base_link', 
-                    target_frame, 
-                    rclpy.time.Time(seconds=0) 
+                    'camera_color_optical_frame', 
+                    Time(seconds=0, nanoseconds=0),  # Explicit zero = get latest
+                    timeout=Duration(seconds=0.5)  # Add timeout
                 )
+                
                 # Position: Places the cube in the world based on the latest camera pose
                 R_base_cam = R_scipy.from_quat([t.transform.rotation.x, t.transform.rotation.y, t.transform.rotation.z, t.transform.rotation.w])
                 T_base_cam = np.array([t.transform.translation.x, t.transform.translation.y, t.transform.translation.z])
@@ -189,7 +194,14 @@ class UmiDetectorNode(Node):
                 fused_quat = (R_cube_world * R_fix).as_quat()
 
             except Exception as e:
-                self.get_logger().warn(f"TF Lookup failed: {e}")
+                # Suppress warnings during first 3 seconds (TF buffer warmup)
+                elapsed = (self.get_clock().now() - self.startup_time).nanoseconds / 1e9
+                if elapsed > 3.0 and not self.tf_ready:
+                    self.get_logger().info("TF chain established successfully")
+                    self.tf_ready = True
+                elif elapsed > 3.0:
+                    # Only warn after warmup period
+                    self.get_logger().warn(f"TF Lookup failed: {e}", throttle_duration_sec=5.0)
                 return
                         
             # Filtering
@@ -251,9 +263,14 @@ class UmiDetectorNode(Node):
 def main():
     rclpy.init()
     node = UmiDetectorNode()
-    try: rclpy.spin(node)
-    except KeyboardInterrupt: pass
-    finally: rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if rclpy.ok():
+            node.destroy_node()
+            rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
