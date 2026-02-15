@@ -42,8 +42,6 @@ class VtamControlLoop(Node):
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.tf_broadcaster = TransformBroadcaster(self)
 
-        # 3. State Tracking for "Locked" Pose
-        self.locked_pose = None
         self.last_warning_time = 0
 
         self.gripper_controller = GripperController(self, self.robot)
@@ -55,68 +53,10 @@ class VtamControlLoop(Node):
 
     def control_tick(self):
         self.robot.pull_status()
-        
-        # Attempt to capture the UMI handle pose from the detector
-        try:
-            t = self.tf_buffer.lookup_transform(
-                'base_link', 
-                'umi_disconnect', 
-                rclpy.time.Time(),
-                timeout=rclpy.duration.Duration(seconds=0.1)
-            )
-
-            rotation_quat = quaternion_from_euler(0.424, -0.556, -0.513)
-            current_quat = (
-                t.transform.rotation.x, 
-                t.transform.rotation.y, 
-                t.transform.rotation.z, 
-                t.transform.rotation.w
-            )
-            new_quat = quaternion_multiply(current_quat, rotation_quat)
-            # Apply 180-degree rotation around z-axis and 180-degree roll
-            z_180_quat = quaternion_from_euler(0, 0, 3.14159)
-            new_quat = quaternion_multiply(new_quat, z_180_quat)
-            roll_180_quat = quaternion_from_euler(0, 3.14159, 0)
-            new_quat = quaternion_multiply(new_quat, roll_180_quat)
-            t.transform.rotation.x = new_quat[0]
-            t.transform.rotation.y = new_quat[1]
-            t.transform.rotation.z = new_quat[2]
-            t.transform.rotation.w = new_quat[3]
-            self.locked_pose = t
-        except (LookupException, ConnectivityException, ExtrapolationException) as e:
-            # Only warn occasionally to avoid log spam
-            current_time = time.time()
-            if current_time - self.last_warning_time > 5.0:
-                self.get_logger().debug(f'Waiting for UMI detection: {e}')
-                self.last_warning_time = current_time
-
-        # Broadcast the dynamic gripper body
-        self.broadcast_virtual_gripper()
         self.gripper_controller.tick()
         
         self.robot.push_command()
         self.publish_js()
-
-    def broadcast_virtual_gripper(self):
-        """
-        Broadcasts link_gripper_s3_body. 
-        If UMI is found, it stays at the cube handle.
-        If never found, it defaults to the physical wrist.
-        """
-        t = TransformStamped()
-        t.header.stamp = self.get_clock().now().to_msg()
-        t.child_frame_id = 'link_gripper_s3_body'
-
-        if self.locked_pose is not None:
-            # Use the locked UMI pose
-            t.header.frame_id = 'base_link'
-            t.transform = self.locked_pose.transform
-        else:
-            # Fallback: Attach to the physical wrist roll until first detection
-            t.header.frame_id = 'link_wrist_roll'
-            t.transform.rotation.w = 1.0
-
-        self.tf_broadcaster.sendTransform(t)
 
     def publish_js(self):
         msg = JointState()

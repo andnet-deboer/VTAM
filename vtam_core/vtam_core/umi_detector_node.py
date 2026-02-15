@@ -235,6 +235,9 @@ class UmiDetectorNode(Node):
             # Parent: umi_disconnect
             self.broadcast_frame_quat('umi_gripper', [0.242, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], 'umi_disconnect')
             
+
+            # Attach URDF gripper body to tracked pose
+            self.broadcast_frame_quat('link_gripper_s3_body', [0.012, 0.0, 0.0], [0.5, 0.5, 0.5, 0.5], 'umi_disconnect')
             # Publish Pose Topic for the disconnect point
             p_msg = PoseStamped()
             p_msg.header.stamp = self.get_clock().now().to_msg()

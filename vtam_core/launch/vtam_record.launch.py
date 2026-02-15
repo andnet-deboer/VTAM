@@ -26,9 +26,10 @@ def generate_launch_description():
         launch_arguments={
             'serial_no': '_128422270608',
             'camera_name': 'camera_arm',
+            'rgb_camera.enable_auto_exposure': 'true',
+            'rgb_camera.auto_exposure_priority': 'false',
         }.items()
     )
-
     # Head Camera (D435i) - publishes TF starting from camera_bottom_screw_frame
     camera_head = TimerAction(
         period=3.0,
@@ -40,11 +41,12 @@ def generate_launch_description():
                 launch_arguments={
                     'serial_no': '_239722072992',
                     'camera_name': 'camera',
-                    'device_type': 'd435',  
+                    'device_type': 'd435',
                     'enable_depth': 'false',
-                    'camera_namespace': '',  # No namespace to avoid camera/ prefix
-                    'base_frame_id': 'camera_bottom_screw_frame',  # Attach to URDF frame
-                    'unite_imu_method': '0',  # Disable IMU fusion
+                    'camera_namespace': '',
+                    'base_frame_id': 'camera_bottom_screw_frame',
+                    'unite_imu_method': '0',
+                    'rgb_camera.color_profile': '1280x720x60',
                 }.items()
             )
         ]
