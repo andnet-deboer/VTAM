@@ -1,6 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from kinematics import StretchIK
+from training.utils.kinematics import StretchIK
 from scipy.spatial.transform import Rotation
 
 def plot_stretch_workspace(ax, solver):

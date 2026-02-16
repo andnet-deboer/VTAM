@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import rclpy
+from rclpy.qos import QoSProfile, DurabilityPolicy
 from rclpy.node import Node
 from std_srvs.srv import SetBool
 import subprocess
@@ -33,10 +34,17 @@ class RecordDemoNode(Node):
         
         self.watchdog_timer = self.create_timer(1.0, self.storage_watchdog)
 
-        self.path_pub = self.create_publisher(Path, '/umi_trajectory', 10)
+
+        latching_qos = QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL
+        )
+
+        self.path_pub = self.create_publisher(Path, '/umi_trajectory', latching_qos)
         self.path_msg = Path()
         self.path_msg.header.frame_id = 'base_link'
         self.path_msg.poses = []
+
 
         self.srv = self.create_service(SetBool, 'record_demo', self.record_callback)
         self.get_logger().info(f'Recorder Active (Limit: {self.max_size_gb}GB)')
@@ -65,33 +73,28 @@ class RecordDemoNode(Node):
         return total_size
 
     def stop_recording(self):
-        """Cleanly stops recording and queues the bag for conversion."""
+        """Stop recording and queue the bag for conversion."""
         if self.recording_process is not None:
             bag_to_convert = self.current_bag_path 
             self.get_logger().info("Shutting down recording process...")
-
-            # Reset trajectory UI
-            try:
-                self.path_msg.header.stamp = self.get_clock().now().to_msg()
-                self.path_msg.poses = [] 
-                self.path_pub.publish(self.path_msg)
-            except Exception as e:
-                self.get_logger().error(f"Failed to clear trajectory: {e}")
             
             try:
+                # Cleanly interrupt the rosbag process group
                 pgid = os.getpgid(self.recording_process.pid)
                 os.killpg(pgid, signal.SIGINT)
                 
+                # Wait for clean exit
                 start_wait = time.time()
                 while time.time() - start_wait < 1.0:
                     if self.recording_process.poll() is not None:
                         break
                     time.sleep(0.1)
                 
+                # Force kill if it's hanging
                 if self.recording_process.poll() is None:
                     os.killpg(pgid, signal.SIGKILL)
 
-                # Push to background worker
+                # Push to background worker for Zarr baking
                 self.conversion_queue.put(bag_to_convert)
 
             except Exception as e:
@@ -100,12 +103,12 @@ class RecordDemoNode(Node):
                 self.recording_process = None
                 self.current_bag_path = None
                 self.get_logger().info("System State Reset. Ready for next demo.")
-
+    
     def storage_watchdog(self):
         if self.recording_process and self.current_bag_path:
             current_size = self.get_dir_size(self.current_bag_path)
             if current_size > self.max_bytes:
-                self.get_logger().error("DISK LIMIT EXCEEDED. TRIGGERING STOP.")
+                self.get_logger().error("Disk Limmit Exceeded. Triggering Stop.")
                 self.stop_recording()
 
     def record_callback(self, request, response):
@@ -113,9 +116,17 @@ class RecordDemoNode(Node):
                     self.recording_process.poll() is None)
 
         if not is_running:
-            if self.recording_process is not None:
-                self.recording_process = None
-
+            # Clean up handle if it was left over
+            self.recording_process = None
+            
+            # Clear trajectory in detector to prevent stale data in next demo
+            self.get_logger().info("Sending Clear Signal to Detector...")
+            try:
+                # This calls the service we just created in the other node
+                subprocess.run(["ros2", "service", "call", "/umi_detector/clear_path", "std_srvs/srv/Empty", "{}"], 
+                               timeout=1.0, capture_output=True)
+            except Exception as e:
+                self.get_logger().warn(f"Could not clear detector path: {e}")
             # Prepare paths
             name_prefix = self.get_parameter('demo_name').get_parameter_value().string_value
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -138,7 +149,7 @@ class RecordDemoNode(Node):
             try:
                 self.recording_process = subprocess.Popen(cmd, start_new_session=True)
                 
-                # Mandatory warm-up delay for buffer initialization
+                #  Warm-up delay for buffer initialization
                 self.get_logger().info("Initializing MCAP buffers (2s warm-up)...")
                 time.sleep(2.0)
                 
@@ -186,22 +197,23 @@ class RecordDemoNode(Node):
         try:
             search_path = os.path.dirname(os.path.abspath(__file__))
             vtam_root = None
-            for _ in range(5):
-                if os.path.exists(os.path.join(search_path, 'training', 'process_demo.py')):
+            # Look for the root directory containing 'training'
+            for _ in range(6):
+                if os.path.exists(os.path.join(search_path, 'training')):
                     vtam_root = search_path
                     break
                 search_path = os.path.dirname(search_path)
 
             if not vtam_root:
-                self.get_logger().error("Could not locate VTAM root.")
+                self.get_logger().error(f"Search failed. Last checked: {search_path}")
                 return
 
-            script_path = os.path.join(vtam_root, "training", "process_demo.py")
+            # Updated path to the new scripts location
+            script_path = os.path.join(vtam_root, "training", "scripts", "process_demo.py")
             python_exe = os.path.join(vtam_root, ".venv", "bin", "python3")
 
             self.get_logger().info(f"Launching Zarr Conversion: {os.path.basename(target_mcap)}")
             
-            # Use 'nice' to prevent conversion from lagging the next recording session
             subprocess.run(
                 ["nice", "-n", "15", python_exe, script_path, "--mcap", target_mcap],
                 env=os.environ.copy(),
@@ -215,7 +227,6 @@ class RecordDemoNode(Node):
             self.get_logger().error(f"Synchronizer Error: {e.stderr}")
         except Exception as e:
             self.get_logger().error(f"Unexpected Error: {e}")
-
 def main():
     rclpy.init()
     node = RecordDemoNode()

@@ -20,6 +20,7 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from rclpy.time import Time
 from nav_msgs.msg import Path
+from std_srvs.srv import Empty
 
 class OneEuroFilter:
     def __init__(self, freq, min_cutoff=1.0, beta=0.0, d_cutoff=1.0):
@@ -109,10 +110,14 @@ class UmiDetectorNode(Node):
         self.startup_time = self.get_clock().now()
         self.tf_ready = False
 
+        # Path Publisher
         self.path_pub = self.create_publisher(Path, '/umi_trajectory', 10)
         self.path_msg = Path()
         self.path_msg.header.frame_id = 'base_link'
 
+        # Clear path service
+        self.create_service(Empty, 'umi_detector/clear_path', self.clear_path_cb)
+        
         # Load yaml
         package_share = get_package_share_directory('vtam_core')
         yaml_path = os.path.join(package_share, 'config', 'teleop_april_marker_info_86mm.yaml')
@@ -154,6 +159,22 @@ class UmiDetectorNode(Node):
     def info_cb(self, msg):
         self.camera_info_dict = {'camera_matrix': np.array(msg.k).reshape((3, 3)), 'distortion_coefficients': np.array(msg.d)}
 
+
+    def clear_path_cb(self, request, response):
+        """Wipes the internal trajectory history for a clean start."""
+        self.get_logger().info("!!! NUCLEAR CLEAR: Trajectory Wiped !!!")
+        
+        # Re-initialize the Path message
+        from nav_msgs.msg import Path
+        self.path_msg = Path()
+        self.path_msg.header.frame_id = 'base_link'
+        self.path_msg.header.stamp = self.get_clock().now().to_msg()
+        
+        # Publish empty path
+        self.path_pub.publish(self.path_msg)
+        return response
+
+        return response
     def image_cb(self, msg):
         if self.camera_info_dict is None: return
         cv_img = self.bridge.imgmsg_to_cv2(msg, 'bgr8')

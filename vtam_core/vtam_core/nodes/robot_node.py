@@ -7,7 +7,7 @@ from geometry_msgs.msg import TransformStamped
 import stretch_body.robot as rb
 import time
 from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
-from vtam_core.umi_gripper_node import GripperController
+from vtam_core.nodes.umi_gripper_node import GripperController
 
 # Add these imports
 try:

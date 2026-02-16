@@ -1,4 +1,4 @@
-from setuptools import setup
+from setuptools import setup, find_packages 
 import os
 from glob import glob
 
@@ -7,37 +7,35 @@ package_name = 'vtam_core'
 setup(
     name=package_name,
     version='0.0.1',
-    packages=[package_name],
+
+    packages=find_packages(), 
     data_files=[
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        # Install launch files
         (os.path.join('share', package_name, 'launch'), glob('launch/*.xml')),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.py')),
-        # Install rviz config
         (os.path.join('share', package_name, 'rviz'), glob('rviz/*.rviz')),
-        # Install yaml configs
         (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='Andnet DeBoer',
-    maintainer_email='todo@todo.com',
+    maintainer_email='deboerandnet@gmail.com',
     description='VTAM - Visuo-Tactile Assistive Manipulation',
     license='Apache-2.0',
     entry_points={
         'console_scripts': [
-            'vtam_robot_node = vtam_core.robot_node:main',
+            'vtam_robot_node = vtam_core.nodes.robot_node:main',
             'main_node = vtam_core.main_node:main',
-            'viz_node = vtam_core.viz_node:main',
-            # 'umi_gripper_node = vtam_core.umi_gripper_node:main',
-            'eflesh_node = vtam_core.eflesh_node:main',
-            'eflesh_debug_node = vtam_core.eflesh_debug_node:main',
-            'umi_node = vtam_core.umi_node:main',
-            'record_node = vtam_core.record_node:main',
-            'umi_detector_node = vtam_core.umi_detector_node:main',
-            'streaming_test_node = vtam_core.streaming_test_node:main',
+            'record_node = vtam_core.nodes.record_node:main',
+            'eflesh_node = vtam_core.drivers.eflesh_node:main',
+            'umi_detector_node = vtam_core.drivers.umi_detector_node:main',
+            'umi_gripper_node = vtam_core.nodes.umi_gripper_node:main',
+            
+            # Debug nodes
+            'viz_node = vtam_core.debug.viz_node:main',
+            'eflesh_debug_node = vtam_core.debug.eflesh_debug_node:main',
         ],
     },
 )

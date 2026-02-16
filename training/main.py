@@ -5,8 +5,8 @@ from pathlib import Path
 import numpy as np
 
 # Import modules
-from kinematics import StretchRetargeter
-import process_demo  
+from training.utils.kinematics import StretchRetargeter
+import training.scripts.process_demo as process_demo  
 # import bag_to_zarr # Placeholder for the final export step
 
 def run_pipeline(task_name, episode_id, raw_path, output_root):

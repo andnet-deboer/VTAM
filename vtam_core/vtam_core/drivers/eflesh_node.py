@@ -37,17 +37,27 @@ class SkinSerialReader:
     def _read_loop(self):
         buf = b''
         while self.running:
-            buf += self.ser.read(self.ser.in_waiting or 1)
-            while b'\r\n' in buf:
-                frame, buf = buf.split(b'\r\n', 1)
-                if len(frame) == self.total_frame_size:
-                    sensor_bytes = frame[:self.mag_frame_size]
-                    btn = frame[self.mag_frame_size]
-                    # Parse 5 mags x 4 floats = 20 floats
-                    values = struct.unpack(f'<{self.num_mags * 4}f', sensor_bytes)
-                    with self.lock:
-                        self.latest_data = np.array(values)
-                        self.latest_button = btn
+            try:
+                data = self.ser.read(self.ser.in_waiting or 1)
+                if not data:
+                    continue
+                buf += data
+
+                while b'\r\n' in buf:
+                    frame, buf = buf.split(b'\r\n', 1)
+                    if len(frame) == self.total_frame_size:
+                        sensor_bytes = frame[:self.mag_frame_size]
+                        btn = frame[self.mag_frame_size]
+                        # Parse 5 mags x 4 floats = 20 floats
+                        values = struct.unpack(f'<{self.num_mags * 4}f', sensor_bytes)
+                        with self.lock:
+                            self.latest_data = np.array(values)
+                            self.latest_button = btn
+            except Exception as e:
+                # Prevents the thread from dying on SerialException
+                print(f"Serial error detected: {e}")
+                import time
+                time.sleep(0.1)
 
     def get_data(self):
         """Returns (np.array of 20 floats, button_state) or (None, 0)"""
