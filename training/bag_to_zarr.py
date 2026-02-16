@@ -18,7 +18,7 @@ SIMPLE_IK_DIR = os.path.expanduser("~/VTAM/dependencies/stretch_dex_teleop")
 sys.path.insert(0, SIMPLE_IK_DIR)
 import simple_ik as si
 
-# 7-DOF State: Driving the base while manipulating
+# 6-DOF State: Driving the base while manipulating
 JOINT_NAMES = [
     "joint_mobile_base_rotation", "joint_lift", "joint_arm_l0",
     "joint_wrist_yaw", "joint_wrist_pitch", "joint_wrist_roll",
@@ -41,7 +41,7 @@ def main():
     finally:
         os.chdir(orig_dir)
 
-    GRIPPER_OFFSET_X = 0.242 # From your detector node
+    GRIPPER_OFFSET_X = 0.242
     
     print(f"Full Mobile-Base Trajectory IK: {args.bag}")
     
@@ -69,10 +69,10 @@ def main():
         target_pos = T_base_gripper[:3, 3]
         target_rot = T_base_gripper[:3, :3]
 
-        # 1. Manually calculate required base rotation to face the target XY
+        # Manually calculate required base rotation to face the target XY
         base_theta = np.arctan2(target_pos[1], target_pos[0])
 
-        # 2. Use Prismatic Base IK to find Translation, Lift, and Extension
+        # Use Prismatic Base IK to find Translation, Lift, and Extension
         res_ik = ik_solver.ik_prismatic_base(target_pos)
         
         if res_ik:

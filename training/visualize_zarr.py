@@ -194,23 +194,7 @@ def main():
         print(f"ERROR: Episode {args.episode} doesn't exist (max: {n_episodes - 1})")
         sys.exit(1)
 
-    def replay_in_mujoco(states, fps, speed=1.0, video_path=None):
-        sim = StretchMujocoSimulator()
-        sim.start()
-        
-        # 1. Teleport to the FIRST frame immediately
-        print("Initializing robot to starting pose...")
-        for j, joint_name in enumerate(JOINT_NAMES):
-            mujoco_name = MUJOCO_JOINT_MAP.get(joint_name, joint_name)
-            sim.set_joint_position(mujoco_name, states[0, j])
-        
-        # 2. Let physics settle for a moment
-        time.sleep(2.0) 
-        
-        input("Press Enter in this terminal to start playback...") # Force manual start
-
-        dt = 1.0 / (fps * speed)
-        n_frames = states.shape[0]
+    replay_in_mujoco(states, fps, speed=args.speed, headless=args.headless, video_path=args.video)
 
 
 if __name__ == "__main__":

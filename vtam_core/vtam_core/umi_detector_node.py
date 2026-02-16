@@ -19,6 +19,7 @@ from rclpy.duration import Duration
 import os
 from ament_index_python.packages import get_package_share_directory
 from rclpy.time import Time
+from nav_msgs.msg import Path
 
 class OneEuroFilter:
     def __init__(self, freq, min_cutoff=1.0, beta=0.0, d_cutoff=1.0):
@@ -107,6 +108,10 @@ class UmiDetectorNode(Node):
         # Track startup time to suppress warnings during TF buffer warmup
         self.startup_time = self.get_clock().now()
         self.tf_ready = False
+
+        self.path_pub = self.create_publisher(Path, '/umi_trajectory', 10)
+        self.path_msg = Path()
+        self.path_msg.header.frame_id = 'base_link'
 
         # Load yaml
         package_share = get_package_share_directory('vtam_core')
@@ -246,9 +251,31 @@ class UmiDetectorNode(Node):
             p_msg.pose.orientation.x, p_msg.pose.orientation.y, p_msg.pose.orientation.z, p_msg.pose.orientation.w = map(float, fused_quat)
             self.pose_pub.publish(p_msg)
 
+            # Use the corrected orientation (which includes your R_correction)
+            R_gripper_world = R_scipy.from_quat(fused_quat_corrected)
+
+            # Define the offset exactly as you did in your 'umi_gripper' broadcast
+            gripper_offset_local = np.array([0.242, 0.0, 0.0])
+
+            # Rotate the offset and add it to the base position
+            # This calculates where the 'umi_gripper' frame exists in world-space (base_link)
+            umi_gripper_pos_base = fused_pos + R_gripper_world.apply(gripper_offset_local)
+
+            # Populate the Path Message
+            umi_msg = PoseStamped()
+            umi_msg.header.stamp = self.get_clock().now().to_msg()
+            umi_msg.header.frame_id = 'base_link' # The Path must be in the global frame
+            umi_msg.pose.position.x, umi_msg.pose.position.y, umi_msg.pose.position.z = map(float, umi_gripper_pos_base)
+            umi_msg.pose.orientation.x, umi_msg.pose.orientation.y, umi_msg.pose.orientation.z, umi_msg.pose.orientation.w = map(float, fused_quat_corrected)
+
+            # Append and Publish
+            self.path_msg.poses.append(umi_msg)
+            self.path_msg.header.stamp = umi_msg.header.stamp
+            self.path_pub.publish(self.path_msg)
+
             # Publish Pose Topic for the gripper (relative to handle)
             g_msg = PoseStamped()
-            g_msg.header.stamp = p_msg.header.stamp
+            g_msg.header.stamp = umi_msg.header.stamp
             g_msg.header.frame_id = 'umi_disconnect'
             g_msg.pose.position.x = 0.242
             g_msg.pose.position.y = 0.0

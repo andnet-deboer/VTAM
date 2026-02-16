@@ -166,4 +166,4 @@ class GripperController:
 
     def _log_debug(self):
         if self.ready:
-            self.logger.info(f"Tactile: {self.smoothed_value:.0f} | Gripper: {self.gripper_position:.2f}")
+            self.logger.debug(f"Tactile: {self.smoothed_value:.0f} | Gripper: {self.gripper_position:.2f}")

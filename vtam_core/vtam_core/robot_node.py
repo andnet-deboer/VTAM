@@ -48,6 +48,10 @@ class VtamControlLoop(Node):
         
         self.js_pub = self.create_publisher(JointState, '/joint_states', 10)
         self.create_timer(0.02, self.control_tick)
+
+        self.sync_pub = self.create_publisher(JointState, '/sync_pulse', 10)
+
+        self.create_timer(0.1, self.publish_sync_pulse)
         
         self.get_logger().info('VTAM Control Loop ready')
 
@@ -57,6 +61,14 @@ class VtamControlLoop(Node):
         
         self.robot.push_command()
         self.publish_js()
+
+    def publish_sync_pulse(self):
+        """The heartbeat that tells cameras and eFlesh to 'snap' their data"""
+        msg = JointState()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = "master_clock"
+        # Optional: Include the latest robot poses in this heartbeat to save bandwidth
+        self.sync_pub.publish(msg)
 
     def publish_js(self):
         msg = JointState()
