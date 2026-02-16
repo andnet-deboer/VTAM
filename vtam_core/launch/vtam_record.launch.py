@@ -89,6 +89,14 @@ def generate_launch_description():
         output='screen'
     )
 
+    # record node
+    record_node = Node(
+        package='vtam_core',
+        executable='record_node',
+        output='screen'
+    )
+
+
     
     return LaunchDescription([
         robot_state_publisher_node,
@@ -96,5 +104,6 @@ def generate_launch_description():
         camera_head,
         umi_detector_node,
         eflesh_node,
-        vtam_robot_node,     
+        vtam_robot_node,
+        record_node   
         ])
