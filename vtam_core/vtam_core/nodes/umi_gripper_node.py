@@ -10,6 +10,7 @@ import os
 import yaml
 from std_msgs.msg import Float32MultiArray, Float32
 from ament_index_python.packages import get_package_share_directory
+from rcl_interfaces.msg import SetParametersResult
 
 
 class GripperController:
@@ -26,10 +27,14 @@ class GripperController:
         self.logger = node.get_logger()
 
         # ─── Parameters ───
+        self.node.add_on_set_parameters_callback(self._on_params_changed)
+
         node.declare_parameter('update_calibration', False)
         node.declare_parameter('threshold_percent', 0.10)
         node.declare_parameter('smoothing', 0.3)
         node.declare_parameter('curve_exponent', 0.4)
+        node.declare_parameter('sensitivity_scale', 0.8) # 1.0 = hard squeeze, 0.5 = light touch
+        self.sensitivity_scale = node.get_parameter('sensitivity_scale').value
 
         self.update_mode = node.get_parameter('update_calibration').value
         self.threshold_percent = node.get_parameter('threshold_percent').value
@@ -83,33 +88,69 @@ class GripperController:
         msg.data = float(self.gripper.status['pos'])
         self.pub_width.publish(msg)
 
+    def _on_params_changed(self, params):
+        for param in params:
+            if param.name == 'smoothing':
+                self.smoothing = param.value
+            elif param.name == 'threshold_percent':
+                self.threshold_percent = param.value
+            elif param.name == 'curve_exponent':
+                self.curve_exponent = param.value
+            elif param.name == 'sensitivity_scale':
+                self.sensitivity_scale = param.value
+                
+        self.logger.info("Live-tuned parameters updated.")
+        return SetParametersResult(successful=True)
+
     # ─── Tactile callback ───
 
     def _tactile_cb(self, msg: Float32MultiArray):
+        # Reshape the flat 15-float array into 5 tactile taxels with (x,y,z) components
         data = np.array(msg.data).reshape(5, 3)
+        
+        # Calculate the magnitude of force on each sensor and take the average
         raw_val = np.mean(np.linalg.norm(data, axis=1))
 
+        # Handle the calibration state machine if the node is in update mode
         if self.update_mode and not self.ready:
             self._run_calibration(raw_val)
             return
 
+        # Do nothing if calibration data (baseline/max) isn't loaded yet
         if not self.ready:
             return
 
+        # Apply exponential smoothing to filter out high-frequency sensor noise
         self.smoothed_value = self.smoothing * raw_val + (1 - self.smoothing) * self.smoothed_value
+        
+        # Define the 'deadzone' threshold to ignore tiny baseline fluctuations
         threshold = self.baseline * (1 + self.threshold_percent)
-        range_size = self.max_seen - threshold
-        normalized = np.clip((self.smoothed_value - threshold) / range_size, 0.0, 1.0) if range_size > 0 else 0.0
+        
+        # Calculate the full physical range recorded during calibration
+        actual_range = self.max_seen - threshold
+        
+        # Map current sensor pressure to a 0.0-1.0 range based on calibrated effort
+        physical_effort = np.clip((self.smoothed_value - threshold) / actual_range, 0.0, 1.0) if actual_range > 0 else 0.0
+        
+        # Amplify effort using sensitivity_scale (e.g., 2.0 means 50% squeeze = full grip)
+        normalized = np.clip(physical_effort * self.sensitivity_scale, 0.0, 1.0)
+        
+        # Reshape the response curve; lower exponents (e.g., 0.3) make the start feel snappier
         curved = np.power(normalized, self.curve_exponent)
-        self.gripper_position = (
-            self.gripper_open if curved < 0.01
-            else self.gripper_open - curved * (self.gripper_open - self.gripper_closed)
-        )
+        
+        # Interpolate between max open and fully closed based on the processed tactile signal
+        # We use a small epsilon (0.01) to ensure the gripper fully relaxes when not touched
+        if curved < 0.01:
+            self.gripper_position = self.gripper_open
+        else:
+            total_travel = self.gripper_open - self.gripper_closed
+            self.gripper_position = self.gripper_open - (curved * total_travel)
 
+        # Publish the final 0-1 control value for visualization
         out = Float32()
         out.data = float(curved)
         self.pub_normalized.publish(out)
-
+        
     # ─── Calibration ───
 
     def _start_calibration(self):

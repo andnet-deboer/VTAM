@@ -1,0 +1,501 @@
+#!/usr/bin/env python3
+"""
+differential_ik.py — Jacobian-based trajectory retargeting for Stretch 3.
+
+Theory Reference: Lynch & Park, "Modern Robotics" Ch. 6 (Inverse Kinematics)
+    - Section 6.2: Iterative Numerical IK
+    - Section 6.2.2: Damped Least-Squares (DLS) IK
+
+Pipeline Context:
+    This module is the second stage of a two-stage IK pipeline:
+        Stage 1 (Seed):  Analytical IK via kinematics.py on first N frames → median joint config
+        Stage 2 (Track): Jacobian-based differential IK tracks frame-to-frame
+
+    Input:  obs/ee_pose from synchronized .zarr  (N, 7) as [x, y, z, qx, qy, qz, qw]
+    Output: obs/joint_states                     (N, 6) joint angles
+
+Kinematic Chain (6-DOF):
+    joint_mobile_base_rotation  (revolute)  — yaw of the base
+    joint_lift                  (prismatic) — vertical translation
+    joint_arm_l0                (prismatic) — horizontal extension
+    joint_wrist_yaw             (revolute)  — wrist yaw
+    joint_wrist_pitch           (revolute)  — wrist pitch
+    joint_wrist_roll            (revolute)  — wrist roll
+
+Dependencies:
+    pip install numpy scipy pinocchio modern_robotics
+    Requires: kinematics.py (analytical solver for seeding)
+"""
+
+import numpy as np
+from scipy.spatial.transform import Rotation
+import pinocchio as pin
+import modern_robotics as mr
+
+import sys
+import os
+
+# --- Import analytical solver for seeding ---
+UTILS_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, UTILS_DIR)
+from kinematics import StretchIK
+
+
+class TrajectoryRetargeter:
+    """
+    Full pipeline: EE pose sequence to Joint States sequence.
+    
+    Usage:
+        retargeter = TrajectoryRetargeter()
+        result = retargeter.retarget(positions, quaternions, timestamps)
+        joint_states = result['joint_states']  # (N, 6)
+    """
+
+    JOINT_NAMES = [
+        'joint_mobile_base_rotation', 'joint_lift', 'joint_arm_l0',
+        'joint_wrist_yaw', 'joint_wrist_pitch', 'joint_wrist_roll',
+    ]
+
+    # Which joints are prismatic vs revolute (affects clamping units)
+    JOINT_TYPES = ['revolute', 'prismatic', 'prismatic', 'revolute', 'revolute', 'revolute']
+
+    def __init__(self, urdf_path=None):
+        """
+        Initialize the retargeter.
+        
+        Args:
+            urdf_path: Path to Stretch URDF. If None, auto-detect from VTAM layout.
+        """
+        self.analytical_solver = StretchIK()
+        
+        # --- Seeding Parameters ---
+        self.seed_frames = 10          # Number of initial frames for median seed
+        self.seed_max_failures = 5     # If this many fail, flag the demo
+
+        # --- Differential IK Parameters ---
+        self.damping = 0.05            # λ for DLS: J^T(JJ^T + λ²I)^{-1}
+        self.max_linear_step = 0.01    # meters per frame clamp
+        self.max_angular_step = 0.1    # radians per frame clamp
+        self.max_joint_step_rev = 0.1  # max revolute joint displacement per frame (rad)
+        self.max_joint_step_pri = 0.01 # max prismatic joint displacement per frame (m)
+        self.convergence_thresh = 1e-4 # Cartesian error norm to consider "converged"
+        self.max_inner_iters = 5       # sub-steps if step gets clamped
+
+        # --- Joint Weights (higher = less motion) ---
+        # Penalize base rotation, let arm/wrist do the work
+        # TODO: Tune these ratios
+        self.joint_weights = np.array([
+            10.0,   # base rotation  — expensive, use sparingly
+            1.0,    # lift           — cheap
+            1.0,    # arm extension  — cheap
+            2.0,    # wrist yaw      — moderate
+            2.0,    # wrist pitch    — moderate  
+            2.0,    # wrist roll     — moderate
+        ])
+
+        # --- Neutral Configuration (mid-range of all joints) ---
+        self.neutral_q = np.array([
+            0.0,    # base rotation — centered
+            0.89,   # lift — tabletop height (from dex_teleop)
+            0.05,   # arm extension — nearly retracted, max room to extend
+            0.0,    # wrist yaw — centered
+            0.0,    # wrist pitch — centered
+            0.0,    # wrist roll — centered
+        ])
+
+        # --- Fallback Parameters ---
+        self.fallback_pos_thresh = 0.05  # meters — if tracking error exceeds this, reset
+        self.fallback_ori_thresh = 0.3   # radians
+        
+        if urdf_path is None:
+            urdf_path = self._find_urdf()
+        
+        self._setup_pinocchio(urdf_path)
+
+    def _find_urdf(self):
+        """Auto-detect URDF from the VTAM project layout."""
+        search = os.path.dirname(os.path.abspath(__file__))
+        for _ in range(6):
+            candidate = os.path.join(
+                search, 'dependencies', 'stretch_dex_teleop',
+                'stretch_base_rotation_ik.urdf'
+            )
+            if os.path.exists(candidate):
+                return candidate
+            search = os.path.dirname(search)
+        raise FileNotFoundError("Could not find Stretch URDF. Pass urdf_path explicitly.")
+
+    def _setup_pinocchio(self, urdf_path):
+        """
+        Load URDF into pinocchio and identify the EE frame.
+        """
+        model = pin.buildModelFromUrdf(urdf_path)
+        data = model.createData()
+        ee_frame_id = model.getFrameId("link_grasp_center")
+        joint_ids = [model.getJointId(name) for name in self.JOINT_NAMES]
+
+        self.model = model
+        self.data = data
+        self.ee_frame_id = ee_frame_id
+        self.joint_ids = joint_ids
+        
+        # Cache the column indices for Jacobian extraction and q mapping
+        self.jac_cols = [model.idx_vs[jid] for jid in self.joint_ids]
+        self.q_idxs = [model.idx_qs[jid] for jid in self.joint_ids]
+        
+        print(f"Loaded URDF: {urdf_path}")
+        print(f"  EE Frame: {ee_frame_id} ({model.frames[ee_frame_id].name})")
+        print(f"  Joint IDs: {joint_ids}")
+        print(f"  Jacobian cols: {self.jac_cols}")
+        print(f"  Config idxs: {self.q_idxs}")
+        print(f"  Model nq={model.nq}, nv={model.nv}")
+
+    def _to_full_q(self, q6):
+        """Map our 6 joint values into pinocchio's full configuration vector."""
+        q_full = pin.neutral(self.model)
+        for i, idx in enumerate(self.q_idxs):
+            q_full[idx] = q6[i]
+        return q_full
+
+    #  STAGE 1: SEEDING — Analytical IK + Median
+    # =====================================================================
+
+    def compute_seed(self, positions, quaternions):
+        """
+        Solve analytical IK on first N frames, return median joint config.
+        
+        Args:
+            positions:   (N, 3) array, full trajectory (only first seed_frames used)
+            quaternions: (N, 4) array XYZW
+            
+        Returns:
+            q_seed: (6,) array — seed joint configuration
+            
+        Raises:
+            ValueError: if too many seed frames fail IK
+        """
+        frames = []
+        for i in range(min(self.seed_frames, len(positions))):
+            pos = positions[i]
+            quat = quaternions[i]
+            cfg = self.analytical_solver.solve_single(pos, quat)
+
+            if cfg is not None:
+                print(f"  Seed frame {i}: IK success")
+                frames.append([cfg[n] for n in self.JOINT_NAMES])
+            else:
+                print(f"  Seed frame {i}: IK failed")
+            
+        if len(frames) < self.seed_frames - self.seed_max_failures:
+            raise ValueError(f"Too many seed frames failed IK: {len(frames)}/{self.seed_frames}")
+
+        q_seed = np.median(frames, axis=0)
+        print(f"  Computed seed from {len(frames)} frames.")
+        return q_seed
+    
+    def project_to_workspace(self, positions, quaternions):
+        """
+        Rigid SE(3) transform mapping demo start onto robot's neutral EE pose.
+        """
+        # Demo anchor from first N frames
+        n = min(self.seed_frames, len(positions))
+        anchor_pos = np.median(positions[:n], axis=0)
+        anchor_quat = quaternions[0]  
+        R_anchor = Rotation.from_quat(anchor_quat).as_matrix()
+        T_demo = mr.RpToTrans(R_anchor, anchor_pos)
+
+        # Neutral EE pose from FK
+        neutral_pos, neutral_rot = self.forward_kinematics(self.neutral_q)
+        T_neutral = mr.RpToTrans(neutral_rot, neutral_pos)
+
+        # 1. Define the Sequential Hypothesis
+        R_x_flip = Rotation.from_euler('x', 90, degrees=True)
+        R_z_rot  = Rotation.from_euler('z', 180, degrees=True)
+        R_y_pitch = Rotation.from_euler('y', -180, degrees=True)
+        
+        # 2. Combine them: R_final = R_y * R_z * R_x
+        # This applies X first, then Z, then Y.
+        R_hypothesis = (R_y_pitch * R_z_rot * R_x_flip).as_matrix()
+        T_hypothesis = mr.RpToTrans(R_hypothesis, np.zeros(3))
+
+        # 3. Update the Transform Chain
+        T_transform = T_neutral @ T_hypothesis @ mr.TransInv(T_demo)
+
+        # Apply to all frames
+        local_positions = np.zeros_like(positions)
+        local_quaternions = np.zeros_like(quaternions)
+
+        for i in range(len(positions)):
+            R_i = Rotation.from_quat(quaternions[i]).as_matrix()
+            T_i = mr.RpToTrans(R_i, positions[i])
+            T_new = T_transform @ T_i
+            local_positions[i] = T_new[:3, 3]
+            local_quaternions[i] = Rotation.from_matrix(T_new[:3, :3]).as_quat()
+
+        print(f"  Workspace projection: demo anchor → neutral EE (180 deg X-flip applied)")
+        print(f"    Anchor pos: [{anchor_pos[0]:.3f}, {anchor_pos[1]:.3f}, {anchor_pos[2]:.3f}]")
+        print(f"    Neutral pos: [{neutral_pos[0]:.3f}, {neutral_pos[1]:.3f}, {neutral_pos[2]:.3f}]")
+        print(f"    Translation applied: {np.linalg.norm(T_transform[:3, 3]):.3f}m")
+
+        return local_positions, local_quaternions, T_transform
+        
+    #  STAGE 2: DIFFERENTIAL IK — Jacobian-based tracking
+    # =====================================================================
+
+    def compute_jacobian(self, q):
+        """
+        Compute the 6x6 geometric Jacobian at configuration q.
+        
+        Args:
+            q: (6,) array — current joint configuration
+            
+        Returns:
+            J: (6, 6) array — geometric Jacobian
+        """
+        q_full = self._to_full_q(q)
+        pin.computeJointJacobians(self.model, self.data, q_full)
+        pin.updateFramePlacements(self.model, self.data)
+        J_full = pin.getFrameJacobian(self.model, self.data, self.ee_frame_id, 
+                                       pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)
+        J = J_full[:, self.jac_cols]
+        return J
+
+    def forward_kinematics(self, q):
+        """
+        Compute EE pose at configuration q.
+        
+        Args:
+            q: (6,) array — joint configuration
+            
+        Returns:
+            position: (3,) array
+            rotation: (3, 3) array
+        """
+        q_full = self._to_full_q(q)
+        pin.forwardKinematics(self.model, self.data, q_full)
+        pin.updateFramePlacements(self.model, self.data)
+        oMf = self.data.oMf[self.ee_frame_id]
+        position = oMf.translation.copy()
+        rotation = oMf.rotation.copy()
+        return position, rotation
+
+    def compute_pose_error(self, current_pos, current_rot, target_pos, target_quat):
+        """
+        Compute the 6D pose error (twist) between current and target.
+
+        Args:
+            current_pos:  (3,) current EE position
+            current_rot:  (3,3) current EE rotation matrix
+            target_pos:   (3,) target position
+            target_quat:  (4,) target quaternion XYZW
+            
+        Returns:
+            error: (6,) array — [dx, dy, dz, wx, wy, wz] (pinocchio convention)
+        """
+        T_current = mr.RpToTrans(current_rot, current_pos)
+        R_target = Rotation.from_quat(target_quat).as_matrix()
+        T_target = mr.RpToTrans(R_target, target_pos)
+
+        T_err = T_target @ mr.TransInv(T_current)
+        error = mr.se3ToVec(mr.MatrixLog6(T_err))
+        # Reorder from MR convention [w, v] to pinocchio convention [v, w]
+        return np.concatenate([error[3:], error[:3]])
+    
+    
+    def weighted_dls_solve(self, J, e):
+        """
+        Weighted damped least-squares solve.
+        
+        Computes: dq = W^{-1} J^T (J W^{-1} J^T + λ²I)^{-1} e
+        
+        Args:
+            J: (6, 6) Jacobian
+            e: (6,) pose error
+            
+        Returns:
+            dq: (6,) joint displacement
+        """
+        W_inv = np.diag(1.0 / self.joint_weights)
+        JWinv = J @ W_inv
+        A = JWinv @ J.T + (self.damping ** 2) * np.eye(6)
+        dq = W_inv @ J.T @ np.linalg.solve(A, e)
+        return dq
+
+    def step_ik(self, q_current, target_pos, target_quat):
+        """
+        One step of damped least-squares IK.
+        
+        Args:
+            q_current:   (6,) current joint configuration
+            target_pos:  (3,) target EE position
+            target_quat: (4,) target EE quaternion XYZW
+            
+        Returns:
+            q_new:     (6,) updated joint configuration
+            pos_error: float — position error norm (meters)
+            ori_error: float — orientation error norm (radians)
+        """
+        # FK at current config
+        current_pos, current_rot = self.forward_kinematics(q_current)
+
+        # Calculate Pose error
+        e = self.compute_pose_error(current_pos, current_rot, target_pos, target_quat)
+
+        pos_error = np.linalg.norm(e[:3])
+        ori_error = np.linalg.norm(e[3:])
+
+        # Convergence check
+        if np.linalg.norm(e) < self.convergence_thresh:
+            return q_current.copy(), pos_error, ori_error
+
+        # Jacobian
+        J = self.compute_jacobian(q_current)
+
+        # Weighted DLS solve
+        dq = self.weighted_dls_solve(J, e)
+
+        # Clamp
+        dq = self.clamp_joint_step(dq)
+
+        # Update
+        q_new = q_current + dq
+        return q_new, pos_error, ori_error
+
+    def clamp_joint_step(self, dq):
+        """
+        Clamp per-joint displacement to prevent large jumps.
+        
+        Args:
+            dq: (6,) proposed joint displacement
+            
+        Returns:
+            dq_clamped: (6,) clamped displacement
+        """
+        dq_clamped = dq.copy()
+        for i in range(len(dq)):
+            if self.JOINT_TYPES[i] == 'revolute':
+                dq_clamped[i] = np.clip(dq[i], -self.max_joint_step_rev, self.max_joint_step_rev)
+            else:
+                dq_clamped[i] = np.clip(dq[i], -self.max_joint_step_pri, self.max_joint_step_pri)
+        return dq_clamped
+
+
+    #  FULL PIPELINE
+    # =====================================================================
+
+    def retarget(self, positions, quaternions, timestamps):
+        """
+        Full retargeting pipeline: EE poses → joint trajectory.
+        
+        Args:
+            positions:   (N, 3) array
+            quaternions: (N, 4) array XYZW
+            timestamps:  (N,) array
+            
+        Returns:
+            dict with keys:
+                'joint_states':    (N, 6) array
+                'joint_names':     list of 6 strings
+                'pos_error':       (N,) array — per-frame position error (m)
+                'ori_error':       (N,) array — per-frame orientation error (rad)
+                'seed_frames':     int
+                'fallback_count':  int
+                'timestamps':      (N,) array (pass-through)
+                'T_transform':     (4, 4) array — SE(3) workspace projection
+                'base_xy':         (2,) array — base position for deployment
+        """
+        N = len(positions)
+        quaternions = self._standardize_quats(quaternions)
+
+        # Stage 0: Project trajectory into robot workspace
+        positions, quaternions, T_transform = self.project_to_workspace(positions, quaternions)
+
+        # Stage 1: Seed with analytical IK median
+        q_seed = self.neutral_q.copy()
+        seed_count = 0  # no analytical seeding used
+
+        # Stage 2: Track with differential IK
+        joint_states = np.zeros((N, 6))
+        pos_errors = np.zeros(N)
+        ori_errors = np.zeros(N)
+        fallback_count = 0
+
+        q = q_seed.copy()
+
+        for i in range(N):
+            # Inner iteration loop — multiple sub-steps if clamping limits progress
+            for _ in range(self.max_inner_iters):
+                q_new, pe, oe = self.step_ik(q, positions[i], quaternions[i])
+
+                # Check if converged
+                if pe < self.convergence_thresh and oe < self.convergence_thresh:
+                    break
+                q = q_new
+
+            # Final error evaluation at the actual output config
+            q = q_new
+            fk_pos, fk_rot = self.forward_kinematics(q)
+            e_final = self.compute_pose_error(fk_pos, fk_rot, positions[i], quaternions[i])
+            pos_errors[i] = np.linalg.norm(e_final[:3])
+            ori_errors[i] = np.linalg.norm(e_final[3:])
+            joint_states[i] = q
+
+            # Fallback check — if tracking diverged, try analytical reset
+            if pos_errors[i] > self.fallback_pos_thresh or ori_errors[i] > self.fallback_ori_thresh:
+                cfg = self.analytical_solver.solve_single(positions[i], quaternions[i])
+                if cfg is not None:
+                    q = np.array([cfg[n] for n in self.JOINT_NAMES])
+                    fk_pos, fk_rot = self.forward_kinematics(q)
+                    e = self.compute_pose_error(fk_pos, fk_rot, positions[i], quaternions[i])
+                    pos_errors[i] = np.linalg.norm(e[:3])
+                    ori_errors[i] = np.linalg.norm(e[3:])
+                    joint_states[i] = q
+                fallback_count += 1
+
+        return {
+            'joint_states': joint_states,
+            'joint_names': list(self.JOINT_NAMES),
+            'pos_error': pos_errors,
+            'ori_error': ori_errors,
+            'seed_frames': seed_count,
+            'fallback_count': fallback_count,
+            'timestamps': timestamps,
+            'T_transform': T_transform,
+            'base_xy': T_transform[:2, 3],
+        }
+    def _standardize_quats(self, quats):
+        """Flip quaternions to ensure shortest rotation path between consecutive frames."""
+        quats = quats.copy()
+        for i in range(1, len(quats)):
+            if np.dot(quats[i - 1], quats[i]) < 0:
+                quats[i] = -quats[i]
+        return quats
+
+
+#  STANDALONE TEST
+# =========================================================================
+
+if __name__ == '__main__':
+    print("=== Differential IK Self-Test ===\n")
+    
+    retargeter = TrajectoryRetargeter()
+    
+    N = 50
+    t = np.linspace(0, 5, N)
+    positions = np.column_stack([
+        -0.1 * np.ones(N),
+        -0.4 + 0.1 * np.sin(t),
+        0.6 * np.ones(N),
+    ])
+    
+    base_quat = Rotation.from_euler('y', 0.5).as_quat()
+    quaternions = np.tile(base_quat, (N, 1))
+    
+    result = retargeter.retarget(positions, quaternions, t)
+    
+    print(f"Seed frames used:    {result['seed_frames']}")
+    print(f"Fallback resets:     {result['fallback_count']}")
+    print(f"Mean position error: {np.mean(result['pos_error'])*1000:.2f} mm")
+    print(f"Max position error:  {np.max(result['pos_error'])*1000:.2f} mm")
+    print(f"Mean orient. error:  {np.degrees(np.mean(result['ori_error'])):.2f} deg")
+    print(f"Max orient. error:   {np.degrees(np.max(result['ori_error'])):.2f} deg")
