@@ -56,7 +56,7 @@ class TrajectoryRetargeter:
         'joint_wrist_yaw', 'joint_wrist_pitch', 'joint_wrist_roll',
     ]
 
-    # Which joints are prismatic vs revolute (affects clamping units)
+    # Define joint types
     JOINT_TYPES = ['revolute', 'prismatic', 'prismatic', 'prismatic', 'revolute', 'revolute', 'revolute']
 
     def __init__(self, urdf_path=None):
@@ -82,7 +82,7 @@ class TrajectoryRetargeter:
         self.max_inner_iters = 5       # sub-steps if step gets clamped
 
         # --- Joint Weights (higher = less motion) ---
-        # 8-DOF Weights: Prioritize Rotation to align the heading
+        # 7-DOF Weights: Prioritize Rotation to align the heading
         self.joint_weights = np.array([
             0.5,   # base rotation (Make it cheap to face the target)
             1.5,   # base translation (Slightly expensive)
@@ -255,40 +255,40 @@ class TrajectoryRetargeter:
     #     return local_positions, local_quaternions, T_transform
         
     def project_to_workspace(self, positions, quaternions):
-        """Shifts demo XY to fingertips. No orientation hypothesis/flipping."""
-        n = min(self.seed_frames, len(positions))
-        anchor_pos = np.median(positions[:n], axis=0)
+        """
+        Anchors the trajectory so the first frame is exactly at the robot's neutral stance.
+        This preserves the relative movement and prevents the 400mm+ IK jump.
+        """
+        # 1. Capture the starting point of the human demonstration
+        anchor_pos = positions[0]
+        anchor_quat = quaternions[0]
         
-        neutral_pos, _ = self.forward_kinematics(self.neutral_q)
-        
-        print(f"\n[WORKSPACE PROJECTION]")
-        print(f"  Demo anchor (first {n} frames median): {anchor_pos}")
-        print(f"  Robot neutral fingertips:              {neutral_pos}")
-        
-        # Calculate the XY Slide
-        x_shift = neutral_pos[0] - anchor_pos[0]
-        y_shift = neutral_pos[1] - anchor_pos[1]
-        
-        print(f"  Calculated XY shift: [{x_shift:.3f}, {y_shift:.3f}]")
-        
-        # Apply to all frames
+        # 2. Identify the Robot's physical 'Neutral' fingertip pose (FK of neutral_q)
+        # This is where the robot is physically standing in MuJoCo/Real-Life.
+        neutral_pos, neutral_rot = self.forward_kinematics(self.neutral_q)
+        neutral_quat = Rotation.from_matrix(neutral_rot).as_quat()
+
+        # 3. Calculate the coordinate transform to bridge the gap
+        # T_transform maps the human demo start to the robot neutral start
+        T_transform = np.eye(4)
+        T_transform[:3, 3] = neutral_pos - anchor_pos
+
         local_positions = np.zeros_like(positions)
         local_quaternions = np.zeros_like(quaternions)
 
         for i in range(len(positions)):
-            local_positions[i, 0] = positions[i, 0] + x_shift
-            local_positions[i, 1] = positions[i, 1] + y_shift
-            local_positions[i, 2] = positions[i, 2]
-            local_quaternions[i] = quaternions[i]
-
-        print(f"  Result - X range: [{local_positions[:, 0].min():.3f}, {local_positions[:, 0].max():.3f}]")
-        print(f"  Result - Y range: [{local_positions[:, 1].min():.3f}, {local_positions[:, 1].max():.3f}]")
-        print(f"  Result - Z range: [{local_positions[:, 2].min():.3f}, {local_positions[:, 2].max():.3f}]")
-
-        # Simplified T_transform for logging
-        T_transform = np.eye(4)
-        T_transform[0, 3] = x_shift
-        T_transform[1, 3] = y_shift
+            # 4. RELATIVE POSITIONING: Move the robot by the same amount the human moved
+            displacement = positions[i] - anchor_pos
+            local_positions[i] = neutral_pos + displacement
+            
+            # 5. RELATIVE ORIENTATION: Align human wrist rotation with robot wrist
+            # Uses the delta from frame 0 to preserve the demonstration's rotation intent.
+            R_anchor = Rotation.from_quat(anchor_quat)
+            R_i = Rotation.from_quat(quaternions[i])
+            R_rel = R_i * R_anchor.inv()  # The rotation change made by the human
+            
+            R_neutral = Rotation.from_quat(neutral_quat)
+            local_quaternions[i] = (R_rel * R_neutral).as_quat()
 
         return local_positions, local_quaternions, T_transform
     
