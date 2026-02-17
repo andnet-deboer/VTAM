@@ -98,7 +98,7 @@ class TrajectoryRetargeter:
             0.0,    # base rotation — centered
             0.25,    # base translation — centered
             0.89,   # lift — tabletop height (from dex_teleop)
-            0.25,   # arm extension — nearly retracted, max room to extend
+            0.05,   # arm extension — nearly retracted, max room to extend
             0.0,    # wrist yaw — centered
             0.0,    # wrist pitch — centered
             0.0,    # wrist roll — centered
@@ -231,19 +231,23 @@ class TrajectoryRetargeter:
         local_positions = np.zeros_like(positions)
         local_quaternions = np.zeros_like(quaternions)
 
+        # Apply rotation to account for UMI to URDF frame discrepancy 
+        R_umi = Rotation.from_euler('z', 0, degrees=True)
+
+        # Capture the initial rotation as the 'zero' reference
+        R_anchor_inv = Rotation.from_quat(anchor_quat).inv()
+        R_neutral = Rotation.from_quat(neutral_quat)
+
         for i in range(len(positions)):
-            # RELATIVE POSITIONING: Move the robot by the same amount the human moved
-            displacement = positions[i] - anchor_pos
-            local_positions[i] = neutral_pos + displacement
+            # Displacement
+            local_positions[i] = neutral_pos + (positions[i] - anchor_pos)
             
-            # RELATIVE ORIENTATION: Align human wrist rotation with robot wrist
-            # Uses the delta from frame 0 to preserve the demonstration's rotation intent.
-            R_anchor = Rotation.from_quat(anchor_quat)
-            R_i = Rotation.from_quat(quaternions[i])
-            R_rel = R_i * R_anchor.inv()  # The rotation change made by the human
+            # Calculate UMI's rotation change
+            R_rel = Rotation.from_quat(quaternions[i]) * R_anchor_inv
             
-            R_neutral = Rotation.from_quat(neutral_quat)
-            local_quaternions[i] = (R_rel * R_neutral).as_quat()
+            # Apply the rotation change in front of the neutral pose
+            # This maps "Hand-Yaw" directly to "Robot-Yaw" regardless of starting tilt.
+            local_quaternions[i] = (R_neutral * R_rel).as_quat()
 
         return local_positions, local_quaternions, T_transform
     
