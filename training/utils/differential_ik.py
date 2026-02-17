@@ -208,67 +208,22 @@ class TrajectoryRetargeter:
         print(f"  Computed seed from {len(frames)} frames.")
         return q_seed
     
-    # def project_to_workspace(self, positions, quaternions):
-    #     """
-    #     Shifts XY to fingertips and locks Z to tabletop height.
-    #     """
-    #     # 1. Capture Demo Anchor (The starting pose 2m away)
-    #     n = min(self.seed_frames, len(positions))
-    #     anchor_pos = np.median(positions[:n], axis=0)
-        
-    #     # 2. Identify the Robot's 'Neutral' Position (0.89m Lift, 0.25m Arm)
-    #     neutral_pos, _ = self.forward_kinematics(self.neutral_q)
-
-    #     # 3. Orientation Flip (Hypothesis)
-    #     R_x_flip = Rotation.from_euler('x', 90, degrees=True)
-    #     R_z_rot  = Rotation.from_euler('z', 180, degrees=True)
-    #     R_y_pitch = Rotation.from_euler('y', -180, degrees=True)
-    #     R_hyp = (R_y_pitch * R_z_rot * R_x_flip).as_matrix()
-
-    #     # 4. Apply to all frames
-    #     local_positions = np.zeros_like(positions)
-    #     local_quaternions = np.zeros_like(quaternions)
-
-    #     for i in range(len(positions)):
-    #         # RELATIVE MOTION ONLY
-    #         # Find how far you moved from the start of the demo
-    #         rel_p = positions[i] - anchor_pos
-            
-    #         # Rotate that movement to match the robot's face
-    #         rotated_rel_p = R_hyp @ rel_p
-            
-    #         # FINAL POSITION:
-    #         # Start at neutral fingertips [0.25, 0.0, 0.89]
-    #         # Add the rotated relative movement
-    #         local_positions[i] = neutral_pos + rotated_rel_p
-            
-    #         # ORIENTATION:
-    #         # Flip the demo rotation to match the robot's mast
-    #         R_i = Rotation.from_quat(quaternions[i]).as_matrix()
-    #         local_quaternions[i] = Rotation.from_matrix(R_hyp @ R_i).as_quat()
-
-    #     # Generate a standard T_transform for the return value
-    #     T_transform = np.eye(4)
-    #     T_transform[:3, :3] = R_hyp
-    #     T_transform[:3, 3] = neutral_pos - (R_hyp @ anchor_pos)
-
-    #     return local_positions, local_quaternions, T_transform
         
     def project_to_workspace(self, positions, quaternions):
         """
         Anchors the trajectory so the first frame is exactly at the robot's neutral stance.
         This preserves the relative movement and prevents the 400mm+ IK jump.
         """
-        # 1. Capture the starting point of the human demonstration
+        # Capture the starting point of the human demonstration
         anchor_pos = positions[0]
         anchor_quat = quaternions[0]
         
-        # 2. Identify the Robot's physical 'Neutral' fingertip pose (FK of neutral_q)
+        #  Identify the Robot's physical 'Neutral' fingertip pose (FK of neutral_q)
         # This is where the robot is physically standing in MuJoCo/Real-Life.
         neutral_pos, neutral_rot = self.forward_kinematics(self.neutral_q)
         neutral_quat = Rotation.from_matrix(neutral_rot).as_quat()
 
-        # 3. Calculate the coordinate transform to bridge the gap
+        # Calculate the coordinate transform to bridge the gap
         # T_transform maps the human demo start to the robot neutral start
         T_transform = np.eye(4)
         T_transform[:3, 3] = neutral_pos - anchor_pos
@@ -277,11 +232,11 @@ class TrajectoryRetargeter:
         local_quaternions = np.zeros_like(quaternions)
 
         for i in range(len(positions)):
-            # 4. RELATIVE POSITIONING: Move the robot by the same amount the human moved
+            # RELATIVE POSITIONING: Move the robot by the same amount the human moved
             displacement = positions[i] - anchor_pos
             local_positions[i] = neutral_pos + displacement
             
-            # 5. RELATIVE ORIENTATION: Align human wrist rotation with robot wrist
+            # RELATIVE ORIENTATION: Align human wrist rotation with robot wrist
             # Uses the delta from frame 0 to preserve the demonstration's rotation intent.
             R_anchor = Rotation.from_quat(anchor_quat)
             R_i = Rotation.from_quat(quaternions[i])
@@ -354,6 +309,25 @@ class TrajectoryRetargeter:
         # Reorder from MR convention [w, v] to pinocchio convention [v, w]
         return np.concatenate([error[3:], error[:3]])
     
+    
+    # def weighted_dls_solve(self, J, e):
+    #     """
+    #     Modified DLS to favor turning then driving (Non-Holonomic behavior).
+    #     """
+    #     # 1. Heavily penalize lateral (Y) base movement indirectly
+    #     # We do this by making 'Base Translation' expensive if the heading is wrong.
+    #     W_inv = np.diag(1.0 / self.joint_weights)
+        
+    #     # 2. Add a 'Non-Holonomic' penalty to the Jacobian itself
+    #     # We can zero out or heavily dampen the Jacobian columns that 
+    #     # contribute to sideways motion relative to the base heading.
+    #     JWinv = J @ W_inv
+        
+    #     # 3. Standard DLS calculation
+    #     A = JWinv @ J.T + (self.damping ** 2) * np.eye(6)
+    #     dq = W_inv @ J.T @ np.linalg.solve(A, e)
+        
+    #     return dq
     
     def weighted_dls_solve(self, J, e):
         """
