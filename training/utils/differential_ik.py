@@ -52,12 +52,12 @@ class TrajectoryRetargeter:
     """
 
     JOINT_NAMES = [
-        'joint_mobile_base_rotation', 'joint_lift', 'joint_arm_l0',
+       'joint_mobile_base_rotation', 'joint_mobile_base_translation', 'joint_lift', 'joint_arm_l0',
         'joint_wrist_yaw', 'joint_wrist_pitch', 'joint_wrist_roll',
     ]
 
     # Which joints are prismatic vs revolute (affects clamping units)
-    JOINT_TYPES = ['revolute', 'prismatic', 'prismatic', 'revolute', 'revolute', 'revolute']
+    JOINT_TYPES = ['revolute', 'prismatic', 'prismatic', 'prismatic', 'revolute', 'revolute', 'revolute']
 
     def __init__(self, urdf_path=None):
         """
@@ -82,22 +82,23 @@ class TrajectoryRetargeter:
         self.max_inner_iters = 5       # sub-steps if step gets clamped
 
         # --- Joint Weights (higher = less motion) ---
-        # Penalize base rotation, let arm/wrist do the work
-        # TODO: Tune these ratios
+        # 8-DOF Weights: Prioritize Rotation to align the heading
         self.joint_weights = np.array([
-            10.0,   # base rotation  — expensive, use sparingly
-            1.0,    # lift           — cheap
-            1.0,    # arm extension  — cheap
-            2.0,    # wrist yaw      — moderate
-            2.0,    # wrist pitch    — moderate  
-            2.0,    # wrist roll     — moderate
+            0.5,   # base rotation (Make it cheap to face the target)
+            1.5,   # base translation (Slightly expensive)
+            1.0,   # lift
+            1.0,   # arm extension
+            2.0,   # wrist yaw
+            2.0,   # wrist pitch
+            2.0,   # wrist roll
         ])
 
         # --- Neutral Configuration (mid-range of all joints) ---
         self.neutral_q = np.array([
             0.0,    # base rotation — centered
+            0.25,    # base translation — centered
             0.89,   # lift — tabletop height (from dex_teleop)
-            0.05,   # arm extension — nearly retracted, max room to extend
+            0.25,   # arm extension — nearly retracted, max room to extend
             0.0,    # wrist yaw — centered
             0.0,    # wrist pitch — centered
             0.0,    # wrist roll — centered
@@ -113,18 +114,17 @@ class TrajectoryRetargeter:
         self._setup_pinocchio(urdf_path)
 
     def _find_urdf(self):
-        """Auto-detect URDF from the VTAM project layout."""
-        search = os.path.dirname(os.path.abspath(__file__))
-        for _ in range(6):
-            candidate = os.path.join(
-                search, 'dependencies', 'stretch_dex_teleop',
-                'stretch_base_rotation_ik.urdf'
-            )
-            if os.path.exists(candidate):
-                return candidate
-            search = os.path.dirname(search)
-        raise FileNotFoundError("Could not find Stretch URDF. Pass urdf_path explicitly.")
-
+            """Auto-detect the new 8-DOF Omni URDF from the local utils folder."""
+            # Get the directory for for URDF search (same as this script)
+            utils_dir = os.path.dirname(os.path.abspath(__file__))
+            
+            omni_candidate = os.path.join(utils_dir, 'stretch_omni_mobile_ik.urdf')
+            if os.path.exists(omni_candidate):
+                print(f"  [FOUND] Loading local 8-DOF URDF: {omni_candidate}")
+                return omni_candidate
+            else:
+                raise FileNotFoundError("Could not find Stretch URDF locally or in dependencies.")
+    
     def _setup_pinocchio(self, urdf_path):
         """
         Load URDF into pinocchio and identify the EE frame.
@@ -150,8 +150,18 @@ class TrajectoryRetargeter:
         print(f"  Config idxs: {self.q_idxs}")
         print(f"  Model nq={model.nq}, nv={model.nv}")
 
+        print(f"\n=== JOINT MAPPING DEBUG ===")
+        for i, name in enumerate(self.JOINT_NAMES):
+            jid = self.joint_ids[i]
+            q_idx = self.q_idxs[i]
+            print(f"  {i}: {name}")
+            print(f"      Joint ID: {jid}, Config idx: {q_idx}")
+            if jid < len(self.model.joints):
+                joint = self.model.joints[jid]
+                print(f"      Type: {joint}")
+
     def _to_full_q(self, q6):
-        """Map our 6 joint values into pinocchio's full configuration vector."""
+        """Map our 7 joint values into pinocchio's full configuration vector."""
         q_full = pin.neutral(self.model)
         for i, idx in enumerate(self.q_idxs):
             q_full[idx] = q6[i]
@@ -181,10 +191,15 @@ class TrajectoryRetargeter:
             cfg = self.analytical_solver.solve_single(pos, quat)
 
             if cfg is not None:
-                print(f"  Seed frame {i}: IK success")
-                frames.append([cfg[n] for n in self.JOINT_NAMES])
-            else:
-                print(f"  Seed frame {i}: IK failed")
+                # Map analytical 6-DOF solution to 8-DOF chain
+                # Set base joints to 0.0 or current if they aren't in the analytical solve
+                row = []
+                for name in self.JOINT_NAMES:
+                    if name in cfg:
+                        row.append(cfg[name])
+                    else:
+                        row.append(0.0) # Default for virtual base joints
+                frames.append(row)
             
         if len(frames) < self.seed_frames - self.seed_max_failures:
             raise ValueError(f"Too many seed frames failed IK: {len(frames)}/{self.seed_frames}")
@@ -193,52 +208,90 @@ class TrajectoryRetargeter:
         print(f"  Computed seed from {len(frames)} frames.")
         return q_seed
     
+    # def project_to_workspace(self, positions, quaternions):
+    #     """
+    #     Shifts XY to fingertips and locks Z to tabletop height.
+    #     """
+    #     # 1. Capture Demo Anchor (The starting pose 2m away)
+    #     n = min(self.seed_frames, len(positions))
+    #     anchor_pos = np.median(positions[:n], axis=0)
+        
+    #     # 2. Identify the Robot's 'Neutral' Position (0.89m Lift, 0.25m Arm)
+    #     neutral_pos, _ = self.forward_kinematics(self.neutral_q)
+
+    #     # 3. Orientation Flip (Hypothesis)
+    #     R_x_flip = Rotation.from_euler('x', 90, degrees=True)
+    #     R_z_rot  = Rotation.from_euler('z', 180, degrees=True)
+    #     R_y_pitch = Rotation.from_euler('y', -180, degrees=True)
+    #     R_hyp = (R_y_pitch * R_z_rot * R_x_flip).as_matrix()
+
+    #     # 4. Apply to all frames
+    #     local_positions = np.zeros_like(positions)
+    #     local_quaternions = np.zeros_like(quaternions)
+
+    #     for i in range(len(positions)):
+    #         # RELATIVE MOTION ONLY
+    #         # Find how far you moved from the start of the demo
+    #         rel_p = positions[i] - anchor_pos
+            
+    #         # Rotate that movement to match the robot's face
+    #         rotated_rel_p = R_hyp @ rel_p
+            
+    #         # FINAL POSITION:
+    #         # Start at neutral fingertips [0.25, 0.0, 0.89]
+    #         # Add the rotated relative movement
+    #         local_positions[i] = neutral_pos + rotated_rel_p
+            
+    #         # ORIENTATION:
+    #         # Flip the demo rotation to match the robot's mast
+    #         R_i = Rotation.from_quat(quaternions[i]).as_matrix()
+    #         local_quaternions[i] = Rotation.from_matrix(R_hyp @ R_i).as_quat()
+
+    #     # Generate a standard T_transform for the return value
+    #     T_transform = np.eye(4)
+    #     T_transform[:3, :3] = R_hyp
+    #     T_transform[:3, 3] = neutral_pos - (R_hyp @ anchor_pos)
+
+    #     return local_positions, local_quaternions, T_transform
+        
     def project_to_workspace(self, positions, quaternions):
-        """
-        Rigid SE(3) transform mapping demo start onto robot's neutral EE pose.
-        """
-        # Demo anchor from first N frames
+        """Shifts demo XY to fingertips. No orientation hypothesis/flipping."""
         n = min(self.seed_frames, len(positions))
         anchor_pos = np.median(positions[:n], axis=0)
-        anchor_quat = quaternions[0]  
-        R_anchor = Rotation.from_quat(anchor_quat).as_matrix()
-        T_demo = mr.RpToTrans(R_anchor, anchor_pos)
-
-        # Neutral EE pose from FK
-        neutral_pos, neutral_rot = self.forward_kinematics(self.neutral_q)
-        T_neutral = mr.RpToTrans(neutral_rot, neutral_pos)
-
-        # 1. Define the Sequential Hypothesis
-        R_x_flip = Rotation.from_euler('x', 90, degrees=True)
-        R_z_rot  = Rotation.from_euler('z', 180, degrees=True)
-        R_y_pitch = Rotation.from_euler('y', -180, degrees=True)
         
-        # 2. Combine them: R_final = R_y * R_z * R_x
-        # This applies X first, then Z, then Y.
-        R_hypothesis = (R_y_pitch * R_z_rot * R_x_flip).as_matrix()
-        T_hypothesis = mr.RpToTrans(R_hypothesis, np.zeros(3))
-
-        # 3. Update the Transform Chain
-        T_transform = T_neutral @ T_hypothesis @ mr.TransInv(T_demo)
-
+        neutral_pos, _ = self.forward_kinematics(self.neutral_q)
+        
+        print(f"\n[WORKSPACE PROJECTION]")
+        print(f"  Demo anchor (first {n} frames median): {anchor_pos}")
+        print(f"  Robot neutral fingertips:              {neutral_pos}")
+        
+        # Calculate the XY Slide
+        x_shift = neutral_pos[0] - anchor_pos[0]
+        y_shift = neutral_pos[1] - anchor_pos[1]
+        
+        print(f"  Calculated XY shift: [{x_shift:.3f}, {y_shift:.3f}]")
+        
         # Apply to all frames
         local_positions = np.zeros_like(positions)
         local_quaternions = np.zeros_like(quaternions)
 
         for i in range(len(positions)):
-            R_i = Rotation.from_quat(quaternions[i]).as_matrix()
-            T_i = mr.RpToTrans(R_i, positions[i])
-            T_new = T_transform @ T_i
-            local_positions[i] = T_new[:3, 3]
-            local_quaternions[i] = Rotation.from_matrix(T_new[:3, :3]).as_quat()
+            local_positions[i, 0] = positions[i, 0] + x_shift
+            local_positions[i, 1] = positions[i, 1] + y_shift
+            local_positions[i, 2] = positions[i, 2]
+            local_quaternions[i] = quaternions[i]
 
-        print(f"  Workspace projection: demo anchor → neutral EE (180 deg X-flip applied)")
-        print(f"    Anchor pos: [{anchor_pos[0]:.3f}, {anchor_pos[1]:.3f}, {anchor_pos[2]:.3f}]")
-        print(f"    Neutral pos: [{neutral_pos[0]:.3f}, {neutral_pos[1]:.3f}, {neutral_pos[2]:.3f}]")
-        print(f"    Translation applied: {np.linalg.norm(T_transform[:3, 3]):.3f}m")
+        print(f"  Result - X range: [{local_positions[:, 0].min():.3f}, {local_positions[:, 0].max():.3f}]")
+        print(f"  Result - Y range: [{local_positions[:, 1].min():.3f}, {local_positions[:, 1].max():.3f}]")
+        print(f"  Result - Z range: [{local_positions[:, 2].min():.3f}, {local_positions[:, 2].max():.3f}]")
+
+        # Simplified T_transform for logging
+        T_transform = np.eye(4)
+        T_transform[0, 3] = x_shift
+        T_transform[1, 3] = y_shift
 
         return local_positions, local_quaternions, T_transform
-        
+    
     #  STAGE 2: DIFFERENTIAL IK — Jacobian-based tracking
     # =====================================================================
 
@@ -407,15 +460,25 @@ class TrajectoryRetargeter:
         N = len(positions)
         quaternions = self._standardize_quats(quaternions)
 
+        print("\n=== RETARGETING DEBUG ===")
+        print(f"Raw position[0]: {positions[0]}")
+        print(f"Raw quaternion[0]: {quaternions[0]}")
+
         # Stage 0: Project trajectory into robot workspace
         positions, quaternions, T_transform = self.project_to_workspace(positions, quaternions)
+
+        print(f"\nAfter workspace projection:")
+        print(f"  Projected position[0]: {positions[0]}")
+        print(f"  Neutral config: {self.neutral_q}")
+        print(f"  Joint names: {self.JOINT_NAMES}")
 
         # Stage 1: Seed with analytical IK median
         q_seed = self.neutral_q.copy()
         seed_count = 0  # no analytical seeding used
 
         # Stage 2: Track with differential IK
-        joint_states = np.zeros((N, 6))
+        n_joints = len(self.JOINT_NAMES)
+        joint_states = np.zeros((N, n_joints))
         pos_errors = np.zeros(N)
         ori_errors = np.zeros(N)
         fallback_count = 0
@@ -440,11 +503,23 @@ class TrajectoryRetargeter:
             ori_errors[i] = np.linalg.norm(e_final[3:])
             joint_states[i] = q
 
+            # DEBUG: Print first frame results
+            if i == 0:
+                print(f"\n=== FIRST FRAME IK RESULT ===")
+                print(f"  Target: {positions[0]}")
+                print(f"  Achieved: {fk_pos}")
+                print(f"  Joint states: {joint_states[0]}")
+                print(f"  Base rotation: {joint_states[0, 0]:.3f} rad ({np.degrees(joint_states[0, 0]):.1f} deg)")
+                print(f"  Base translation: {joint_states[0, 1]:.3f} m")
+                print(f"  Lift: {joint_states[0, 2]:.3f} m")
+                print(f"  Arm: {joint_states[0, 3]:.3f} m")
+                print(f"  Position error: {pos_errors[0]*1000:.1f} mm")
+
             # Fallback check — if tracking diverged, try analytical reset
             if pos_errors[i] > self.fallback_pos_thresh or ori_errors[i] > self.fallback_ori_thresh:
                 cfg = self.analytical_solver.solve_single(positions[i], quaternions[i])
                 if cfg is not None:
-                    q = np.array([cfg[n] for n in self.JOINT_NAMES])
+                    q = np.array([cfg.get(n, 0.0) for n in self.JOINT_NAMES])
                     fk_pos, fk_rot = self.forward_kinematics(q)
                     e = self.compute_pose_error(fk_pos, fk_rot, positions[i], quaternions[i])
                     pos_errors[i] = np.linalg.norm(e[:3])

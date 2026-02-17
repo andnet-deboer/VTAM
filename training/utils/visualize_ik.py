@@ -25,6 +25,7 @@ JOINT_NAMES = [
 
 # Mapping between URDF joint names and MuJoCo names
 MUJOCO_JOINT_MAP = {
+    'joint_mobile_base_translation': 'base_translate', # Verify this in your XML
     'joint_mobile_base_rotation': 'base_rotate',
     'joint_lift': 'lift',
     'joint_arm_l0': 'arm',
@@ -84,20 +85,27 @@ def replay_in_mujoco(result, speed=1.0):
                 
                 # 2. COMMAND BASE (Velocity Tracking)
                 # Since we can't use move_to for base_rotate, we pull pose and drive
+                # 2. Update Velocity Tracking in replay_in_mujoco loop
                 try:
-                    current_yaw = sim.get_base_pose()[2]
-                    target_yaw = joints[i, base_idx]
+                    # Current pose from simulator [x, y, yaw]
+                    curr_x, curr_y, curr_yaw = sim.get_base_pose()
                     
-                    # Shortest path error
-                    yaw_err = (target_yaw - current_yaw + np.pi) % (2 * np.pi) - np.pi
+                    # Target states from IK result
+                    target_trans = joints[i, 1]  # joint_mobile_base_translation
+                    target_yaw   = joints[i, 0]  # joint_mobile_base_rotation
                     
-                    # Proportional gain: try to close the gap within one frame
+                    # Calculate angular velocity (omega)
+                    yaw_err = (target_yaw - curr_yaw + np.pi) % (2 * np.pi) - np.pi
                     omega = yaw_err * sync_hz * speed 
-                    sim.set_base_velocity(v_linear=0.0, v_angular=float(omega))
+
+                    # Calculate linear velocity (v_linear) 
+                    # This assumes base_translation maps to forward/backward movement
+                    trans_err = target_trans - curr_x 
+                    v_lin = trans_err * sync_hz * speed
+
+                    sim.set_base_velocity(v_linear=float(v_lin), v_angular=float(omega))
                 except Exception as e:
-                    # If pose fails (sim crash), exit the frame loop
-                    print(f"\nSimulation Error: {e}")
-                    break
+                    print(f"Sim Error: {e}")
                 
                 print_frame_status(i, n_frames, joints[i], pos_err[i], 0)
                 
