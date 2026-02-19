@@ -30,10 +30,10 @@ class GripperController:
         self.node.add_on_set_parameters_callback(self._on_params_changed)
 
         node.declare_parameter('update_calibration', False)
-        node.declare_parameter('threshold_percent', 0.10)
-        node.declare_parameter('smoothing', 0.3)
-        node.declare_parameter('curve_exponent', 0.4)
-        node.declare_parameter('sensitivity_scale', 0.8) # 1.0 = hard squeeze, 0.5 = light touch
+        node.declare_parameter('threshold_percent', 0.001)
+        node.declare_parameter('smoothing', 0.8)
+        node.declare_parameter('curve_exponent', 0.25)
+        node.declare_parameter('sensitivity_scale', 1.8) # 1.0 = hard squeeze, 0.5 = light touch
         self.sensitivity_scale = node.get_parameter('sensitivity_scale').value
 
         self.update_mode = node.get_parameter('update_calibration').value
