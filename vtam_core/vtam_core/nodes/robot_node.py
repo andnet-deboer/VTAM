@@ -8,6 +8,7 @@ import stretch_body.robot as rb
 import time
 from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
 from vtam_core.nodes.umi_gripper_node import GripperController
+from vtam_core.umi_pose_tracker import HeadPoseTracker
 
 # Add these imports
 try:
@@ -52,12 +53,15 @@ class VtamControlLoop(Node):
         self.sync_pub = self.create_publisher(JointState, '/sync_pulse', 10)
 
         self.create_timer(0.1, self.publish_sync_pulse)
+
+        self.head_tracker = HeadPoseTracker(self, self.robot)
         
         self.get_logger().info('VTAM Control Loop ready')
 
     def control_tick(self):
         self.robot.pull_status()
         self.gripper_controller.tick()
+        self.head_tracker.tick()
         
         self.robot.push_command()
         self.publish_js()

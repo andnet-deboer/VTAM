@@ -33,7 +33,16 @@ class RecordDemoNode(Node):
         self.max_bytes = self.max_size_gb * 1024 * 1024 * 1024
         
         self.watchdog_timer = self.create_timer(1.0, self.storage_watchdog)
-
+        
+        self.tts_cache = os.path.expanduser("~/VTAM/data/assets/tts_cache")
+        os.makedirs(self.tts_cache, exist_ok=True)
+        
+        # Ensure the speakers are unmuted on startup
+        try:
+            subprocess.run(["amixer", "set", "Master", "unmute"], capture_output=True)
+            subprocess.run(["amixer", "set", "Master", "80%"], capture_output=True)
+        except Exception:
+            self.get_logger().warn("Could not set system volume.")
 
         latching_qos = QoSProfile(
             depth=1,
@@ -71,6 +80,22 @@ class RecordDemoNode(Node):
                 if not os.path.islink(fp):
                     total_size += os.path.getsize(fp)
         return total_size
+    
+    def play_audio_feedback(self, sound_type):
+        """Plays pre-generated TTS mp3 files."""
+        file_map = {
+            "start": "start.mp3",
+            "stop": "stop.mp3"
+        }
+        audio_path = os.path.join(self.tts_cache, file_map.get(sound_type, ""))
+        
+        if os.path.exists(audio_path):
+            # Using mpg123 for low-latency playback
+            subprocess.Popen(["mpg123", "-q", audio_path])
+        else:
+            # Fallback to espeak if files aren't generated yet
+            fallback_text = "Recording" if sound_type == "start" else "Stopped"
+            subprocess.Popen(["espeak", fallback_text])
 
     def stop_recording(self):
         """Stop recording and queue the bag for conversion."""
@@ -82,6 +107,7 @@ class RecordDemoNode(Node):
                 # Cleanly interrupt the rosbag process group
                 pgid = os.getpgid(self.recording_process.pid)
                 os.killpg(pgid, signal.SIGINT)
+                self.play_audio_feedback("stop")
                 
                 # Wait for clean exit
                 start_wait = time.time()
@@ -151,6 +177,7 @@ class RecordDemoNode(Node):
                 
                 #  Warm-up delay for buffer initialization
                 self.get_logger().info("Initializing MCAP buffers (2s warm-up)...")
+                self.play_audio_feedback("start")
                 time.sleep(2.0)
                 
                 response.success = True
