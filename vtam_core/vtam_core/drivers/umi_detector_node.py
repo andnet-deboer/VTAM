@@ -175,134 +175,123 @@ class UmiDetectorNode(Node):
         return response
 
         return response
+
     def image_cb(self, msg):
-        if self.camera_info_dict is None: return
+        if self.camera_info_dict is None:
+            return
+
         cv_img = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
-        corners, ids, _ = self.detector.detectMarkers(cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY))
-        if ids is None: return
+        gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
+        corners, ids, _ = self.detector.detectMarkers(gray)
+        
+        # 1. Exit early if no markers are seen
+        if ids is None:
+            return
         
         cube_candidates = []
         for c, aid in zip(corners, ids.flatten()):
             aid = int(aid)
-            if aid not in self.collection: self.collection[aid] = AprilTagMarker(aid, self.marker_info)
+            if aid not in self.collection:
+                self.collection[aid] = AprilTagMarker(aid, self.marker_info)
+            
             marker = self.collection[aid]
             marker.update(c[0], self.camera_info_dict['camera_matrix'], self.camera_info_dict['distortion_coefficients'])
+            
             frames = marker.info.get('frames', {})
             if 'umi_cube' in frames:
                 config = frames['umi_cube']
-                res = get_cube_pose_from_tag(marker.pos, marker.axes[0], marker.axes[1], marker.axes[2], 
-                                            config.get('trans', [0.0,0.0,0.0]), config.get('quat', [0.0,0.0,0.0,1.0]))
-                cube_candidates.append({'pos': res['pos'], 'quat': res['quat'], 'weight': calculate_tag_weight(c[0])})
-        if cube_candidates:
-            # Detection relative to Camera (solvePnP output)
-            weights = np.array([c['weight'] for c in cube_candidates])
-            f_pos_cam = np.average([c['pos'] for c in cube_candidates], axis=0, weights=weights/sum(weights))
-            f_quat_cam = average_quaternions([c['quat'] for c in cube_candidates], weights/sum(weights))
-            
-            try:
-                t = self.tf_buffer.lookup_transform(
-                    'base_link', 
-                    'camera_color_optical_frame', 
-                    Time(seconds=0, nanoseconds=0),  # Explicit zero = get latest
-                    timeout=Duration(seconds=0.5)  # Add timeout
+                res = get_cube_pose_from_tag(
+                    marker.pos, marker.axes[0], marker.axes[1], marker.axes[2], 
+                    config.get('trans', [0.0, 0.0, 0.0]), 
+                    config.get('quat', [0.0, 0.0, 0.0, 1.0])
                 )
-                
-                # Position: Places the cube in the world based on the latest camera pose
-                R_base_cam = R_scipy.from_quat([t.transform.rotation.x, t.transform.rotation.y, t.transform.rotation.z, t.transform.rotation.w])
-                T_base_cam = np.array([t.transform.translation.x, t.transform.translation.y, t.transform.translation.z])
-                fused_pos = T_base_cam + R_base_cam.apply(f_pos_cam)
-                
-                # Orientation: Uses the latest head tilt to "un-sway" the cube
-                cam_rpy = R_base_cam.as_euler('xyz', degrees=True)
-                live_pitch = cam_rpy[1] 
-                R_cube_world = R_base_cam * R_scipy.from_quat(f_quat_cam)
-                R_fix = R_scipy.from_euler('zyx', [0, -live_pitch, 180], degrees=True)
-                fused_quat = (R_cube_world * R_fix).as_quat()
+                cube_candidates.append({
+                    'pos': res['pos'], 
+                    'quat': res['quat'], 
+                    'weight': calculate_tag_weight(c[0])
+                })
 
-            except Exception as e:
-                # Suppress warnings during first 3 seconds (TF buffer warmup)
-                elapsed = (self.get_clock().now() - self.startup_time).nanoseconds / 1e9
-                if elapsed > 3.0 and not self.tf_ready:
-                    self.get_logger().info("TF chain established successfully")
-                    self.tf_ready = True
-                elif elapsed > 3.0:
-                    # Only warn after warmup period
-                    self.get_logger().warn(f"TF Lookup failed: {e}", throttle_duration_sec=5.0)
-                return
-                        
+        # 2. Exit if no cube-related tags are valid
+        if not cube_candidates:
+            return
+
+        # Weighted averaging of raw detections in camera space
+        weights = np.array([c['weight'] for c in cube_candidates])
+        norm_weights = weights / np.sum(weights)
+        f_pos_cam = np.average([c['pos'] for c in cube_candidates], axis=0, weights=norm_weights)
+        f_quat_cam = average_quaternions([c['quat'] for c in cube_candidates], norm_weights)
+        
+        try:
+            # Explicitly fetch the latest transform
+            # Increased timeout slightly to handle system jitter
+            t = self.tf_buffer.lookup_transform(
+                'base_link', 
+                'camera_color_optical_frame', 
+                Time(seconds=0), 
+                timeout=Duration(seconds=0.05)
+            )
+            
+            # Transformation matrices
+            R_base_cam = R_scipy.from_quat([
+                t.transform.rotation.x, t.transform.rotation.y, 
+                t.transform.rotation.z, t.transform.rotation.w
+            ])
+            T_base_cam = np.array([
+                t.transform.translation.x, 
+                t.transform.translation.y, 
+                t.transform.translation.z
+            ])
+
+            # Decouple camera pitch to stop tilt jitter
+            cam_rpy = R_base_cam.as_euler('xyz', degrees=True)
+            current_pitch = cam_rpy[1]
+            
+            if not hasattr(self, 'smoothed_pitch'):
+                self.smoothed_pitch = current_pitch
+            else:
+                self.smoothed_pitch = (0.9 * self.smoothed_pitch) + (0.1 * current_pitch)
+
+            # Global Position
+            fused_pos = T_base_cam + R_base_cam.apply(f_pos_cam)
+            
+            # Global Orientation with smoothed pitch correction
+            R_cube_world = R_base_cam * R_scipy.from_quat(f_quat_cam)
+            R_fix = R_scipy.from_euler('zyx', [0, -self.smoothed_pitch, 180], degrees=True)
+            fused_quat = (R_cube_world * R_fix).as_quat()
+
             # Filtering
             fused_pos = self.pos_filter.filter(fused_pos)
-            if self.prev_cube_pose is not None and np.dot(fused_quat, self.prev_cube_pose['quat']) < 0:
-                fused_quat = -fused_quat
+            if self.prev_cube_pose is not None:
+                if np.dot(fused_quat, self.prev_cube_pose['quat']) < 0:
+                    fused_quat = -fused_quat
+            
             fq_raw = self.quat_filter.filter(fused_quat)
             fused_quat = fq_raw / np.linalg.norm(fq_raw)
-
-            # Define your corrective rotation (e.g., 90 deg around X)
-            R_correction = R_scipy.from_euler('z', 90, degrees=True)
-
-            # Apply it to the fused orientation
-            R_disconnect_raw = R_scipy.from_quat(fused_quat)
-            fused_quat_corrected = (R_disconnect_raw * R_correction).as_quat()
-
             self.prev_cube_pose = {'pos': fused_pos, 'quat': fused_quat}
 
-            
-            # Broadcast the main filtered handle pose (now called umi_disconnect)
-            # Parent: base_link
+            # Final rotation correction
+            R_correction = R_scipy.from_euler('z', 90, degrees=True)
+            fused_quat_corrected = (R_scipy.from_quat(fused_quat) * R_correction).as_quat()
+
+            # Broadcast frames only if we successfully calculated the pose
+            now = self.get_clock().now().to_msg()
             self.broadcast_frame_quat('umi_disconnect', fused_pos, fused_quat_corrected, 'base_link')
-            
-            # Project the Fiducial Cube (The actual physical cube location)
-            # Offset: 57.5mm back (-X) and 61mm up (+Z) relative to disconnect point
-            # Parent: umi_disconnect
-            fiducial_offset = [-0.0575, 0.0, 0.061]
-            self.broadcast_frame_quat('fiducial_cube', fiducial_offset, [0.0, 0.0, 0.0, 1.0], 'umi_disconnect')
-
-            # Project the Gripper (The grasp center)
-            # Parent: umi_disconnect
+            self.broadcast_frame_quat('fiducial_cube', [-0.0575, 0.0, 0.061], [0.0, 0.0, 0.0, 1.0], 'umi_disconnect')
             self.broadcast_frame_quat('umi_gripper', [0.242, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], 'umi_disconnect')
-            
-
-            # Attach URDF gripper body to tracked pose
             self.broadcast_frame_quat('link_gripper_s3_body', [0.012, 0.0, 0.0], [0.5, 0.5, 0.5, 0.5], 'umi_disconnect')
-            # Publish Pose Topic for the disconnect point
+
+            # Publish Pose Topics
             p_msg = PoseStamped()
-            p_msg.header.stamp = self.get_clock().now().to_msg()
-            p_msg.header.frame_id = 'base_link'
+            p_msg.header.stamp, p_msg.header.frame_id = now, 'base_link'
             p_msg.pose.position.x, p_msg.pose.position.y, p_msg.pose.position.z = map(float, fused_pos)
-            p_msg.pose.orientation.x, p_msg.pose.orientation.y, p_msg.pose.orientation.z, p_msg.pose.orientation.w = map(float, fused_quat)
+            p_msg.pose.orientation.x, p_msg.pose.orientation.y, p_msg.pose.orientation.z, p_msg.pose.orientation.w = map(float, fused_quat_corrected)
             self.pose_pub.publish(p_msg)
 
-            # Use the corrected orientation (which includes your R_correction)
-            R_gripper_world = R_scipy.from_quat(fused_quat_corrected)
-
-            # Define the offset exactly as you did in your 'umi_gripper' broadcast
-            gripper_offset_local = np.array([0.242, 0.0, 0.0])
-
-            # Rotate the offset and add it to the base position
-            # This calculates where the 'umi_gripper' frame exists in world-space (base_link)
-            umi_gripper_pos_base = fused_pos + R_gripper_world.apply(gripper_offset_local)
-
-            # Populate the Path Message
-            umi_msg = PoseStamped()
-            umi_msg.header.stamp = self.get_clock().now().to_msg()
-            umi_msg.header.frame_id = 'base_link' # The Path must be in the global frame
-            umi_msg.pose.position.x, umi_msg.pose.position.y, umi_msg.pose.position.z = map(float, umi_gripper_pos_base)
-            umi_msg.pose.orientation.x, umi_msg.pose.orientation.y, umi_msg.pose.orientation.z, umi_msg.pose.orientation.w = map(float, fused_quat_corrected)
-
-            # Append and Publish
-            self.path_msg.poses.append(umi_msg)
-            self.path_msg.header.stamp = umi_msg.header.stamp
-            self.path_pub.publish(self.path_msg)
-
-            # Publish Pose Topic for the gripper (relative to handle)
-            g_msg = PoseStamped()
-            g_msg.header.stamp = umi_msg.header.stamp
-            g_msg.header.frame_id = 'umi_disconnect'
-            g_msg.pose.position.x = 0.242
-            g_msg.pose.position.y = 0.0
-            g_msg.pose.position.z = 0.0
-            g_msg.pose.orientation.w = 1.0 
-            self.gripper_pub.publish(g_msg)
+        except Exception as e:
+            # This ensures that if TF fails (e.g., during startup), we don't crash,
+            # but we also don't stop the loop.
+            self.logger.debug(f"TF lookup waiting: {e}")
+            return
 
     def broadcast_frame_quat(self, name, pos, quat, parent):
         t = TransformStamped()
