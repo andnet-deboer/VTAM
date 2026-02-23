@@ -167,11 +167,11 @@ robot_prismatic = deepcopy(robot)
 # Chain: virtual_base -> rotation_link -> base_link
 robot_omni = deepcopy(robot)
 
-# 1. Add intermediate links/virtual base
+# Add intermediate links/virtual base
 robot_omni.add_link(ud.Link(name='virtual_base'))
 robot_omni.add_link(ud.Link(name='base_rotation_link'))
 
-# 2. Add ROTATION Joint (World -> Rotation Link)
+# Add ROTATION Joint (World -> Rotation Link)
 robot_omni.add_joint(ud.Joint(
     name='joint_mobile_base_rotation',
     parent='virtual_base',
@@ -182,7 +182,7 @@ robot_omni.add_joint(ud.Joint(
     limit=ud.JointLimit(effort=10, velocity=1, lower=-np.pi, upper=np.pi)
 ))
 
-# 3. Add TRANSLATION Joint (Rotation Link -> Base Link)
+# Add TRANSLATION Joint (Rotation Link -> Base Link)
 # Nesting this here ensures +X is always "Forward" relative to current rotation
 robot_omni.add_joint(ud.Joint(
     name='joint_mobile_base_translation',

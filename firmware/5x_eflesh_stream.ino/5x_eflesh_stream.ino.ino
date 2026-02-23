@@ -29,6 +29,13 @@ void chooseOrderedAddresses(const uint8_t* found, uint8_t count, uint8_t* ordere
 bool hasExactSet(const uint8_t* found, uint8_t count, const uint8_t* pattern);
 void sortAscending(uint8_t* arr, uint8_t n);
 
+// Adding recording button for DexUMI
+const int buttonPin = A3;
+bool lastButtonState = HIGH;
+bool currentButtonState = HIGH;
+unsigned long lastDebounce = 0;
+const unsigned long debounceDelay = 50;
+
 void setup() {
   Serial.begin(115200);
   while (!Serial) { delay(5); }
@@ -55,6 +62,13 @@ void setup() {
   if (orderedCount != NUM_SENSORS) {
     Serial.println(F("[WARN] Did not find exactly 5 target MLX addresses. Proceeding with what was found."));
   }
+  Serial.print(F("sizeof(txyz) = "));
+  Serial.println(sizeof(MLX90393::txyz));
+  Serial.print(F("Total frame = "));
+  Serial.println(sizeof(dataBuf[0]) * NUM_SENSORS + 1);
+ 
+  // Setup recording button pin
+  pinMode(buttonPin, INPUT_PULLUP);
 
   // Initialize sensors in the chosen order
   for (uint8_t i = 0; i < orderedCount; ++i) {
@@ -85,18 +99,31 @@ void setup() {
 }
 
 void loop() {
-  // Read in the same order the sensors were initialized
+  // Debounce button
+  bool reading = digitalRead(buttonPin);
+  if (reading != lastButtonState) {
+      lastDebounce = millis();
+  }
+  if ((millis() - lastDebounce) > debounceDelay) {
+      if (reading != currentButtonState) {
+          currentButtonState = reading;
+      }
+  }
+  lastButtonState = reading;
+
+  // Read sensors
   for (uint8_t i = 0; i < NUM_SENSORS; ++i) {
-    mlx[i].readBurstData(dataBuf[i]);  // if that index wasn't initialized (no device), the buffer remains whatever it was
+    mlx[i].readBurstData(dataBuf[i]);
   }
 
-  // Write binary records in-order
+  // Write ONE frame: [sensor0..sensor4][btnByte][\r\n]
   for (uint8_t i = 0; i < NUM_SENSORS; ++i) {
     Serial.write((uint8_t*)&dataBuf[i], sizeof(dataBuf[i]));
   }
+  uint8_t btnState = (currentButtonState == LOW) ? 1 : 0;
+  Serial.write(&btnState, 1);
   Serial.println();
 
-  // adjust for desired sample rate
   delayMicroseconds(500);
 }
 

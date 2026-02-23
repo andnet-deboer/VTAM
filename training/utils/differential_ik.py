@@ -84,7 +84,7 @@ class TrajectoryRetargeter:
         # --- Joint Weights (higher = less motion) ---
         # 7-DOF Weights: Prioritize Rotation to align the heading
         self.joint_weights = np.array([
-            0.5,   # base rotation (Make it cheap to face the target)
+            0.5,   # base rotation (Making it cheap to face the target)
             1.5,   # base translation (Slightly expensive)
             1.0,   # lift
             1.0,   # arm extension
@@ -114,13 +114,13 @@ class TrajectoryRetargeter:
         self._setup_pinocchio(urdf_path)
 
     def _find_urdf(self):
-            """Auto-detect the new 8-DOF Omni URDF from the local utils folder."""
+            """Auto-detect the new 7-DOF Omni URDF from the local utils folder."""
             # Get the directory for for URDF search (same as this script)
             utils_dir = os.path.dirname(os.path.abspath(__file__))
             
             omni_candidate = os.path.join(utils_dir, 'stretch_omni_mobile_ik.urdf')
             if os.path.exists(omni_candidate):
-                print(f"  [FOUND] Loading local 8-DOF URDF: {omni_candidate}")
+                print(f"  [FOUND] Loading local 7-DOF URDF: {omni_candidate}")
                 return omni_candidate
             else:
                 raise FileNotFoundError("Could not find Stretch URDF locally or in dependencies.")
@@ -191,7 +191,7 @@ class TrajectoryRetargeter:
             cfg = self.analytical_solver.solve_single(pos, quat)
 
             if cfg is not None:
-                # Map analytical 6-DOF solution to 8-DOF chain
+                # Map analytical 6-DOF solution to 7-DOF chain
                 # Set base joints to 0.0 or current if they aren't in the analytical solve
                 row = []
                 for name in self.JOINT_NAMES:
@@ -230,9 +230,6 @@ class TrajectoryRetargeter:
 
         local_positions = np.zeros_like(positions)
         local_quaternions = np.zeros_like(quaternions)
-
-        # Apply rotation to account for UMI to URDF frame discrepancy 
-        R_umi = Rotation.from_euler('z', 0, degrees=True)
 
         # Capture the initial rotation as the 'zero' reference
         R_anchor_inv = Rotation.from_quat(anchor_quat).inv()
@@ -312,26 +309,6 @@ class TrajectoryRetargeter:
         error = mr.se3ToVec(mr.MatrixLog6(T_err))
         # Reorder from MR convention [w, v] to pinocchio convention [v, w]
         return np.concatenate([error[3:], error[:3]])
-    
-    
-    # def weighted_dls_solve(self, J, e):
-    #     """
-    #     Modified DLS to favor turning then driving (Non-Holonomic behavior).
-    #     """
-    #     # 1. Heavily penalize lateral (Y) base movement indirectly
-    #     # We do this by making 'Base Translation' expensive if the heading is wrong.
-    #     W_inv = np.diag(1.0 / self.joint_weights)
-        
-    #     # 2. Add a 'Non-Holonomic' penalty to the Jacobian itself
-    #     # We can zero out or heavily dampen the Jacobian columns that 
-    #     # contribute to sideways motion relative to the base heading.
-    #     JWinv = J @ W_inv
-        
-    #     # 3. Standard DLS calculation
-    #     A = JWinv @ J.T + (self.damping ** 2) * np.eye(6)
-    #     dq = W_inv @ J.T @ np.linalg.solve(A, e)
-        
-    #     return dq
     
     def weighted_dls_solve(self, J, e):
         """

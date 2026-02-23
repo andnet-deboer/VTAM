@@ -184,7 +184,7 @@ class UmiDetectorNode(Node):
         gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
         corners, ids, _ = self.detector.detectMarkers(gray)
         
-        # 1. Exit early if no markers are seen
+        # Exit early if no markers are seen
         if ids is None:
             return
         
@@ -211,7 +211,7 @@ class UmiDetectorNode(Node):
                     'weight': calculate_tag_weight(c[0])
                 })
 
-        # 2. Exit if no cube-related tags are valid
+        # Exit if no cube-related tags are valid
         if not cube_candidates:
             return
 
@@ -288,9 +288,8 @@ class UmiDetectorNode(Node):
             self.pose_pub.publish(p_msg)
 
         except Exception as e:
-            # This ensures that if TF fails (e.g., during startup), we don't crash,
-            # but we also don't stop the loop.
-            self.logger.debug(f"TF lookup waiting: {e}")
+            # This ensures that if TF fails the loop doesn't crash,
+            self.get_logger(f"TF lookup waiting: {e}")
             return
 
     def broadcast_frame_quat(self, name, pos, quat, parent):
