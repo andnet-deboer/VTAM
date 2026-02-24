@@ -59,6 +59,17 @@ class TrajectoryRetargeter:
     # Define joint types
     JOINT_TYPES = ['revolute', 'prismatic', 'prismatic', 'prismatic', 'revolute', 'revolute', 'revolute']
 
+    # Joint limits: [min, max] for each joint
+    JOINT_LIMITS = np.array([
+            [-np.pi, np.pi],   # base rotation
+            [-100.0,   100.0],     # base translation
+            [ 0.0,   1.1],     # lift
+            [ 0.0,   0.52],    # arm extension
+            [-1.39,  4.42],    # wrist yaw
+            [-1.57,  0.56],    # wrist pitch
+            [-3.14,  3.14],    # wrist roll
+        ])
+    
     def __init__(self, urdf_path=None):
         """
         Initialize the retargeter.
@@ -85,9 +96,9 @@ class TrajectoryRetargeter:
         # 7-DOF Weights: Prioritize Rotation to align the heading
         self.joint_weights = np.array([
             0.5,   # base rotation (Making it cheap to face the target)
-            1.5,   # base translation (Slightly expensive)
+            0.1,   # base translation (Slightly expensive)
             1.0,   # lift
-            1.0,   # arm extension
+            1.5,   # arm extension
             2.0,   # wrist yaw
             2.0,   # wrist pitch
             2.0,   # wrist roll
@@ -96,9 +107,9 @@ class TrajectoryRetargeter:
         # --- Neutral Configuration (mid-range of all joints) ---
         self.neutral_q = np.array([
             0.0,    # base rotation — centered
-            0.25,    # base translation — centered
+            0.0,    # base translation — centered
             0.89,   # lift — tabletop height (from dex_teleop)
-            0.05,   # arm extension — nearly retracted, max room to extend
+            0.10,   # arm extension — nearly retracted, max room to extend
             0.0,    # wrist yaw — centered
             0.0,    # wrist pitch — centered
             0.0,    # wrist roll — centered
@@ -112,6 +123,10 @@ class TrajectoryRetargeter:
             urdf_path = self._find_urdf()
         
         self._setup_pinocchio(urdf_path)
+
+
+    def clamp_to_joint_limits(self, q):
+        return np.clip(q, self.JOINT_LIMITS[:, 0], self.JOINT_LIMITS[:, 1])
 
     def _find_urdf(self):
             """Auto-detect the new 7-DOF Omni URDF from the local utils folder."""
@@ -235,9 +250,17 @@ class TrajectoryRetargeter:
         R_anchor_inv = Rotation.from_quat(anchor_quat).inv()
         R_neutral = Rotation.from_quat(neutral_quat)
 
+        # Demo frame to Robot frame
+        R_anchor = Rotation.from_quat(anchor_quat)
+        R_align_full = R_neutral * R_anchor.inv()
+
+        # Extract only the yaw (Z-rotation), discard pitch/roll
+        yaw_only = R_align_full.as_euler('xyz')[2]
+        R_align = Rotation.from_euler('z', yaw_only)
+
         for i in range(len(positions)):
             # Displacement
-            local_positions[i] = neutral_pos + (positions[i] - anchor_pos)
+            local_positions[i] = neutral_pos + R_align.apply(positions[i] - anchor_pos)
             
             # Calculate UMI's rotation change
             R_rel = Rotation.from_quat(quaternions[i]) * R_anchor_inv
@@ -367,6 +390,10 @@ class TrajectoryRetargeter:
 
         # Update
         q_new = q_current + dq
+
+        # Enforce joint limits
+        q_new = self.clamp_to_joint_limits(q_new)
+
         return q_new, pos_error, ori_error
 
     def clamp_joint_step(self, dq):
@@ -418,6 +445,15 @@ class TrajectoryRetargeter:
         print("\n=== RETARGETING DEBUG ===")
         print(f"Raw position[0]: {positions[0]}")
         print(f"Raw quaternion[0]: {quaternions[0]}")
+
+        # Adapt neutral lift height from demo's starting pose
+        neutral_q = self.neutral_q.copy()  
+        cfg = self.analytical_solver.solve_single(positions[0], quaternions[0])
+        if cfg is not None and 'joint_lift' in cfg:
+            lift_idx = self.JOINT_NAMES.index('joint_lift')
+            neutral_q[lift_idx] = np.clip(cfg['joint_lift'], 0.0, 1.1)
+            print(f"  Adapted neutral lift from demo: {neutral_q[lift_idx]:.3f} m")
+        self.neutral_q = neutral_q
 
         # Stage 0: Project trajectory into robot workspace
         positions, quaternions, T_transform = self.project_to_workspace(positions, quaternions)
@@ -492,7 +528,10 @@ class TrajectoryRetargeter:
             'timestamps': timestamps,
             'T_transform': T_transform,
             'base_xy': T_transform[:2, 3],
+            'target_positions': positions,      
+            'target_quaternions': quaternions,
         }
+    
     def _standardize_quats(self, quats):
         """Flip quaternions to ensure shortest rotation path between consecutive frames."""
         quats = quats.copy()
