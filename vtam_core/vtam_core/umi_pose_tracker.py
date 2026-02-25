@@ -94,7 +94,7 @@ class HeadPoseTracker:
     def _lookup_target(self):
         try:
             t = self.node.tf_buffer.lookup_transform(
-                'link_head', 'fiducial_cube', Time(seconds=0), timeout=Duration(seconds=0.01)
+                'link_head', 'umi_gripper', Time(seconds=0), timeout=Duration(seconds=0.01)
             )
             tr = t.transform.translation
             return (tr.x, tr.y, tr.z)

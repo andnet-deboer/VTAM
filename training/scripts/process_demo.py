@@ -12,7 +12,8 @@ class ZarrSynchronizer:
         self.sync_topic = "/sync_pulse"
         self.topic_map = {
             "/tactile_gripper_controller": "obs/tactile_umi",
-            "/camera_arm/color/image_rect_raw/compressed": "obs/video_wrist"
+            "/camera_arm/color/image_rect_raw/compressed": "obs/video_wrist",
+            "/gripper_width_normalized": "obs/gripper_position",
         }
 
         # SIMPLIFIED CHAIN
@@ -86,6 +87,12 @@ class ZarrSynchronizer:
                         tr, ro = tf.transform.translation, tf.transform.rotation
                         tf_data[pair].append(np.array([tr.x, tr.y, tr.z, ro.x, ro.y, ro.z, ro.w]))
                         tf_ts[pair].append(t)
+
+            elif topic == "/gripper_width_normalized":
+                val = np.array([msg.ros_msg.data], dtype=np.float32)
+                data_buffer["obs/gripper_position"].append(val)
+                ts_buffer["obs/gripper_position"].append(t)
+
             elif topic in self.topic_map:
                 key = self.topic_map[topic]
                 val = np.frombuffer(msg.ros_msg.data, dtype=np.uint8) if "compressed" in topic else np.array(msg.ros_msg.data, dtype=np.float32)

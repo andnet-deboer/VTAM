@@ -4,6 +4,7 @@ import sys
 import os
 import time
 import numpy as np
+from sympy import root
 import zarr
 import rclpy
 from rclpy.node import Node
@@ -33,7 +34,7 @@ ARM_JOINT_NAMES = [
     'joint_lift',
     'joint_arm_l0', 'joint_arm_l1', 'joint_arm_l2', 'joint_arm_l3',
     'joint_wrist_yaw', 'joint_wrist_pitch', 'joint_wrist_roll',
-    'joint_gripper_finger_left', 
+    'gripper_aperture', 
 ]
 
 class RobotReplayNode(Node):
@@ -57,21 +58,30 @@ class RobotReplayNode(Node):
         wyaw_idx = ik_names.index('joint_wrist_yaw')
         wpitch_idx = ik_names.index('joint_wrist_pitch')
         wroll_idx = ik_names.index('joint_wrist_roll')
-        grip_idx = ik_names.index('joint_gripper_finger_left') if 'joint_gripper_finger_left' in ik_names else None
+        
         goal_msg = FollowJointTrajectory.Goal()
-        goal_msg.trajectory.joint_names = ARM_JOINT_NAMES
+
+        has_gripper = 'gripper_position' in ik_names
+        grip_idx = ik_names.index('gripper_position') if has_gripper else None
+        goal_msg.trajectory.joint_names = ARM_JOINT_NAMES if has_gripper else ARM_JOINT_NAMES[:-1]
 
         for i, states in enumerate(ik_states):
             point = JointTrajectoryPoint()
             arm_per_joint = float(states[arm_idx]) / 4.0
-            point.positions = [
+            positions = [
                 float(states[lift_idx]),
                 arm_per_joint, arm_per_joint, arm_per_joint, arm_per_joint,
                 float(states[wyaw_idx]),
                 float(states[wpitch_idx]),
                 float(states[wroll_idx]),
-                float(states[grip_idx]) if grip_idx is not None else 0.0,
             ]
+            if has_gripper:
+                grip_normalized = float(states[grip_idx])
+                grip_aperture = 0.5 - (grip_normalized * 0.8)  # 0→open(0.5), 1→closed(-0.3)
+                positions.append(grip_aperture)
+
+            point.positions = positions
+
             if is_prealign:
                 point.time_from_start.sec = 4
                 point.time_from_start.nanosec = 0
@@ -96,12 +106,12 @@ def load_zarr_joints(zarr_path):
     joint_states = result['joint_states']
     
     # Append gripper as pass-through
-    if 'obs/gripper_position' in root['obs']:
-        gripper = np.array(root['obs/gripper_position'])  # (N,1)
+    if 'gripper_position' in root['obs']:
+        gripper = np.array(root['obs/gripper_position'])
         if gripper.ndim == 1:
             gripper = gripper.reshape(-1, 1)
         joint_states = np.column_stack([joint_states, gripper])
-        joint_names.append('joint_gripper_finger_left')
+        joint_names.append('gripper_position')
     
     return joint_names, joint_states
 
@@ -157,7 +167,7 @@ def main():
     node.get_logger().info('Aligned. Stabilizing...')
     time.sleep(1.0)
 
-    # --- TRAJECTORY (arm via action, base via cmd_vel) ---
+    # Trajectory (arm via action, base via cmd_vel) ---
     print(f"\nReady to execute at {args.speed}x speed.")
     input("Press [ENTER] to PLAY...")
 
@@ -174,6 +184,7 @@ def main():
             twist.linear.x = float((joint_states[i+1, base_trans_idx] - joint_states[i, base_trans_idx]) * fps)
             twist.angular.z = float((joint_states[i+1, base_rot_idx] - joint_states[i, base_rot_idx]) * fps)
         node._cmd_vel_pub.publish(twist)
+        rclpy.spin_once(node, timeout_sec=0) 
         time.sleep(dt)
 
     # Stop base

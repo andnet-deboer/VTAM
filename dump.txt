@@ -1,0 +1,944 @@
+diff --git a/dependencies/anyskin b/dependencies/anyskin
+--- a/dependencies/anyskin
++++ b/dependencies/anyskin
+@@ -1 +1 @@
+-Subproject commit cb13b5b08943e60a28eecacbb7a1b7d1d28c7015
++Subproject commit cb13b5b08943e60a28eecacbb7a1b7d1d28c7015-dirty
+diff --git a/dependencies/stretch_dex_teleop b/dependencies/stretch_dex_teleop
+--- a/dependencies/stretch_dex_teleop
++++ b/dependencies/stretch_dex_teleop
+@@ -1 +1 @@
+-Subproject commit 911b1cf184feda6b2769f228b6da918960979516
++Subproject commit 911b1cf184feda6b2769f228b6da918960979516-dirty
+diff --git a/dependencies/stretch_mujoco b/dependencies/stretch_mujoco
+--- a/dependencies/stretch_mujoco
++++ b/dependencies/stretch_mujoco
+@@ -1 +1 @@
+-Subproject commit d107e094cc295d92f7461bd233daef96e9e22fab
++Subproject commit d107e094cc295d92f7461bd233daef96e9e22fab-dirty
+diff --git a/training/ik.md b/training/ik.md
+index 4c8f5d5..ed62e44 100644
+--- a/training/ik.md
++++ b/training/ik.md
+@@ -3,4 +3,6 @@ python3 test_ik.py ../../data/processed/demo/demo_20260216_020448_0.zarr
+ 
+ python3 visualize_ik.py --zarr ../../data/processed/demo/demo_20260216_020448_0.zarr
+ 
+-python3 validate_pipeline_graph.py --zarr ../../data/processed/demo/demo_20260216_020448_0.zarrg
+\ No newline at end of file
++python3 validate_pipeline_graph.py --zarr ../../data/processed/demo/demo_20260216_020448_0.zarr
++
++python3 visualize_ik.py --zarr ../../data/processed/sine_wave/sine_wave_20260223_024749_0.zarr
+\ No newline at end of file
+diff --git a/training/scripts/bag_to_zarr.py b/training/scripts/bag_to_zarr.py
+deleted file mode 100644
+index 2bde008..0000000
+--- a/training/scripts/bag_to_zarr.py
++++ /dev/null
+@@ -1,116 +0,0 @@
+-#!/usr/bin/env python3
+-import argparse
+-import sys
+-import os
+-import numpy as np
+-import zarr
+-from scipy.spatial.transform import Rotation as R
+-
+-# Patching NumPy
+-if not hasattr(np, "bool"):
+-    np.bool = bool
+-
+-from rosbags.rosbag2 import Reader
+-from rosbags.typesys import get_typestore, Stores
+-
+-# --- PATH CONFIG ---
+-SIMPLE_IK_DIR = os.path.expanduser("~/VTAM/dependencies/stretch_dex_teleop")
+-sys.path.insert(0, SIMPLE_IK_DIR)
+-import simple_ik as si
+-
+-# 6-DOF State: Driving the base while manipulating
+-JOINT_NAMES = [
+-    "joint_mobile_base_rotation", "joint_lift", "joint_arm_l0",
+-    "joint_wrist_yaw", "joint_wrist_pitch", "joint_wrist_roll",
+-    "joint_mobile_base_translation"
+-]
+-
+-def main():
+-    parser = argparse.ArgumentParser()
+-    parser.add_argument("--bag", type=str, required=True)
+-    parser.add_argument("--output", type=str, required=True)
+-    args = parser.parse_args()
+-
+-    typestore = get_typestore(Stores.ROS2_HUMBLE)
+-    
+-    # Initialize IK
+-    orig_dir = os.getcwd()
+-    try:
+-        os.chdir(os.path.abspath(SIMPLE_IK_DIR))
+-        ik_solver = si.SimpleIK()
+-    finally:
+-        os.chdir(orig_dir)
+-
+-    GRIPPER_OFFSET_X = 0.242
+-    
+-    print(f"Full Mobile-Base Trajectory IK: {args.bag}")
+-    
+-    data = {'ts': [], 'pos': [], 'quat': []}
+-    with Reader(args.bag) as reader:
+-        conns = [x for x in reader.connections if x.topic == '/umi_cube_pose']
+-        for conn, _, raw in reader.messages(connections=conns):
+-            msg = typestore.deserialize_cdr(raw, conn.msgtype)
+-            ts = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+-            p, q = msg.pose.position, msg.pose.orientation
+-            data['ts'].append(ts)
+-            data['pos'].append([p.x, p.y, p.z])
+-            data['quat'].append([q.x, q.y, q.z, q.w])
+-
+-    valid_j, valid_ts = [], []
+-
+-    for i in range(len(data['ts'])):
+-        ts = data['ts'][i]
+-        T_base_handle = np.eye(4)
+-        T_base_handle[:3, 3] = data['pos'][i]
+-        T_base_handle[:3, :3] = R.from_quat(data['quat'][i]).as_matrix()
+-        
+-        # Project target to Gripper Center
+-        T_base_gripper = T_base_handle @ np.array([[1,0,0,GRIPPER_OFFSET_X],[0,1,0,0],[0,0,1,0],[0,0,0,1]])
+-        target_pos = T_base_gripper[:3, 3]
+-        target_rot = T_base_gripper[:3, :3]
+-
+-        # Manually calculate required base rotation to face the target XY
+-        base_theta = np.arctan2(target_pos[1], target_pos[0])
+-
+-        # Use Prismatic Base IK to find Translation, Lift, and Extension
+-        res_ik = ik_solver.ik_prismatic_base(target_pos)
+-        
+-        if res_ik:
+-            r = R.from_matrix(target_rot)
+-            ypr = r.as_euler("ZXY", degrees=False)
+-            
+-            # Map the returned keys correctly. SimpleIK prismatic keys are:
+-            # 'joint_mobile_base_translation', 'joint_lift', 'joint_arm_l0'
+-            state = [
+-                float(base_theta),                                    # Manually calculated
+-                float(res_ik['joint_lift']),
+-                float(res_ik['joint_arm_l0']),
+-                float((ypr[0] + np.pi + np.pi) % (2 * np.pi) - np.pi), # Yaw
+-                float(ypr[1]),                                        # Pitch
+-                float((ypr[2] + np.pi + np.pi) % (2 * np.pi) - np.pi), # Roll
+-                float(res_ik['joint_mobile_base_translation'])        # Base driving
+-            ]
+-            valid_j.append(state)
+-            valid_ts.append(ts)
+-
+-    if len(valid_j) < 5:
+-        print("Error: IK Failed. Target likely outside driving/lift limits.")
+-        return
+-
+-    # Save to Zarr
+-    store = zarr.DirectoryStore(args.output)
+-    root = zarr.group(store=store, overwrite=True)
+-    dgrp = root.create_group("data")
+-    dgrp.create_dataset("state", data=np.array(valid_j[:-1], dtype=np.float32))
+-    dgrp.create_dataset("action", data=np.array(valid_j[1:], dtype=np.float32))
+-    dgrp.create_dataset("timestamp", data=np.array(valid_ts[:-1], dtype=np.float64))
+-    
+-    meta = root.create_group("meta")
+-    meta.create_dataset("episode_ends", data=np.array([len(valid_j)-1], dtype=np.int64))
+-    root.attrs["fps"] = 1.0 / np.mean(np.diff(valid_ts))
+-    root.attrs["joint_names"] = JOINT_NAMES
+-    
+-    print(f"Success! {len(valid_j)-1} driving frames saved to {args.output}")
+-
+-if __name__ == "__main__":
+-    main()
+\ No newline at end of file
+diff --git a/training/scripts/process_demo.py b/training/scripts/process_demo.py
+index 19d94ac..d9f40df 100644
+--- a/training/scripts/process_demo.py
++++ b/training/scripts/process_demo.py
+@@ -12,7 +12,8 @@ class ZarrSynchronizer:
+         self.sync_topic = "/sync_pulse"
+         self.topic_map = {
+             "/tactile_gripper_controller": "obs/tactile_umi",
+-            "/camera_arm/color/image_rect_raw/compressed": "obs/video_wrist"
++            "/camera_arm/color/image_rect_raw/compressed": "obs/video_wrist",
++            "/gripper_width_normalized": "obs/gripper_position",
+         }
+ 
+         # SIMPLIFIED CHAIN
+@@ -86,6 +87,12 @@ class ZarrSynchronizer:
+                         tr, ro = tf.transform.translation, tf.transform.rotation
+                         tf_data[pair].append(np.array([tr.x, tr.y, tr.z, ro.x, ro.y, ro.z, ro.w]))
+                         tf_ts[pair].append(t)
++
++            elif topic == "/gripper_width_normalized":
++                val = np.array([msg.ros_msg.data], dtype=np.float32)
++                data_buffer["obs/gripper_position"].append(val)
++                ts_buffer["obs/gripper_position"].append(t)
++
+             elif topic in self.topic_map:
+                 key = self.topic_map[topic]
+                 val = np.frombuffer(msg.ros_msg.data, dtype=np.uint8) if "compressed" in topic else np.array(msg.ros_msg.data, dtype=np.float32)
+diff --git a/training/utils/differential_ik.py b/training/utils/differential_ik.py
+index b97a4ac..f52a43b 100644
+--- a/training/utils/differential_ik.py
++++ b/training/utils/differential_ik.py
+@@ -59,6 +59,17 @@ class TrajectoryRetargeter:
+     # Define joint types
+     JOINT_TYPES = ['revolute', 'prismatic', 'prismatic', 'prismatic', 'revolute', 'revolute', 'revolute']
+ 
++    # Joint limits: [min, max] for each joint
++    JOINT_LIMITS = np.array([
++            [-np.pi, np.pi],   # base rotation
++            [-100.0,   100.0],     # base translation
++            [ 0.0,   1.1],     # lift
++            [ 0.0,   0.52],    # arm extension
++            [-1.39,  4.42],    # wrist yaw
++            [-1.57,  0.56],    # wrist pitch
++            [-3.14,  3.14],    # wrist roll
++        ])
++    
+     def __init__(self, urdf_path=None):
+         """
+         Initialize the retargeter.
+@@ -85,9 +96,9 @@ class TrajectoryRetargeter:
+         # 7-DOF Weights: Prioritize Rotation to align the heading
+         self.joint_weights = np.array([
+             0.5,   # base rotation (Making it cheap to face the target)
+-            1.5,   # base translation (Slightly expensive)
++            0.1,   # base translation (Slightly expensive)
+             1.0,   # lift
+-            1.0,   # arm extension
++            1.5,   # arm extension
+             2.0,   # wrist yaw
+             2.0,   # wrist pitch
+             2.0,   # wrist roll
+@@ -96,9 +107,9 @@ class TrajectoryRetargeter:
+         # --- Neutral Configuration (mid-range of all joints) ---
+         self.neutral_q = np.array([
+             0.0,    # base rotation — centered
+-            0.25,    # base translation — centered
++            0.0,    # base translation — centered
+             0.89,   # lift — tabletop height (from dex_teleop)
+-            0.05,   # arm extension — nearly retracted, max room to extend
++            0.10,   # arm extension — nearly retracted, max room to extend
+             0.0,    # wrist yaw — centered
+             0.0,    # wrist pitch — centered
+             0.0,    # wrist roll — centered
+@@ -113,6 +124,10 @@ class TrajectoryRetargeter:
+         
+         self._setup_pinocchio(urdf_path)
+ 
++
++    def clamp_to_joint_limits(self, q):
++        return np.clip(q, self.JOINT_LIMITS[:, 0], self.JOINT_LIMITS[:, 1])
++
+     def _find_urdf(self):
+             """Auto-detect the new 7-DOF Omni URDF from the local utils folder."""
+             # Get the directory for for URDF search (same as this script)
+@@ -235,9 +250,17 @@ class TrajectoryRetargeter:
+         R_anchor_inv = Rotation.from_quat(anchor_quat).inv()
+         R_neutral = Rotation.from_quat(neutral_quat)
+ 
++        # Demo frame to Robot frame
++        R_anchor = Rotation.from_quat(anchor_quat)
++        R_align_full = R_neutral * R_anchor.inv()
++
++        # Extract only the yaw (Z-rotation), discard pitch/roll
++        yaw_only = R_align_full.as_euler('xyz')[2]
++        R_align = Rotation.from_euler('z', yaw_only)
++
+         for i in range(len(positions)):
+             # Displacement
+-            local_positions[i] = neutral_pos + (positions[i] - anchor_pos)
++            local_positions[i] = neutral_pos + R_align.apply(positions[i] - anchor_pos)
+             
+             # Calculate UMI's rotation change
+             R_rel = Rotation.from_quat(quaternions[i]) * R_anchor_inv
+@@ -367,6 +390,10 @@ class TrajectoryRetargeter:
+ 
+         # Update
+         q_new = q_current + dq
++
++        # Enforce joint limits
++        q_new = self.clamp_to_joint_limits(q_new)
++
+         return q_new, pos_error, ori_error
+ 
+     def clamp_joint_step(self, dq):
+@@ -419,6 +446,15 @@ class TrajectoryRetargeter:
+         print(f"Raw position[0]: {positions[0]}")
+         print(f"Raw quaternion[0]: {quaternions[0]}")
+ 
++        # Adapt neutral lift height from demo's starting pose
++        neutral_q = self.neutral_q.copy()  
++        cfg = self.analytical_solver.solve_single(positions[0], quaternions[0])
++        if cfg is not None and 'joint_lift' in cfg:
++            lift_idx = self.JOINT_NAMES.index('joint_lift')
++            neutral_q[lift_idx] = np.clip(cfg['joint_lift'], 0.0, 1.1)
++            print(f"  Adapted neutral lift from demo: {neutral_q[lift_idx]:.3f} m")
++        self.neutral_q = neutral_q
++
+         # Stage 0: Project trajectory into robot workspace
+         positions, quaternions, T_transform = self.project_to_workspace(positions, quaternions)
+ 
+@@ -492,7 +528,10 @@ class TrajectoryRetargeter:
+             'timestamps': timestamps,
+             'T_transform': T_transform,
+             'base_xy': T_transform[:2, 3],
++            'target_positions': positions,      
++            'target_quaternions': quaternions,
+         }
++    
+     def _standardize_quats(self, quats):
+         """Flip quaternions to ensure shortest rotation path between consecutive frames."""
+         quats = quats.copy()
+diff --git a/training/utils/replay_on_robot.py b/training/utils/replay_on_robot.py
+new file mode 100644
+index 0000000..b0d4a5d
+--- /dev/null
++++ b/training/utils/replay_on_robot.py
+@@ -0,0 +1,206 @@
++#!/usr/bin/env python3
++import argparse
++import sys
++import os
++import time
++import numpy as np
++import zarr
++import rclpy
++from rclpy.node import Node
++from rclpy.action import ActionClient
++from control_msgs.action import FollowJointTrajectory
++from trajectory_msgs.msg import JointTrajectoryPoint
++from action_msgs.msg import GoalStatus
++from geometry_msgs.msg import Twist
++
++SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
++UTILS_DIR = os.path.join(SCRIPT_DIR, '..', 'utils')
++sys.path.insert(0, UTILS_DIR)
++from differential_ik import TrajectoryRetargeter
++
++IK_TO_ROBOT_NAMES = {
++    'joint_mobile_base_rotation': 'rotate_mobile_base',
++    'joint_mobile_base_translation': 'translate_mobile_base',
++    'joint_lift': 'joint_lift',
++    'joint_arm_l0': 'joint_arm_l0',
++    'joint_wrist_yaw': 'joint_wrist_yaw',
++    'joint_wrist_pitch': 'joint_wrist_pitch',
++    'joint_wrist_roll': 'joint_wrist_roll',
++}
++
++# Joints sent via FollowJointTrajectory (no base, arm split into 4)
++ARM_JOINT_NAMES = [
++    'joint_lift',
++    'joint_arm_l0', 'joint_arm_l1', 'joint_arm_l2', 'joint_arm_l3',
++    'joint_wrist_yaw', 'joint_wrist_pitch', 'joint_wrist_roll',
++    'gripper_aperture', 
++]
++
++class RobotReplayNode(Node):
++    def __init__(self):
++        super().__init__('robot_replay_node')
++        self._action_client = ActionClient(
++            self, FollowJointTrajectory, 
++            '/stretch_controller/follow_joint_trajectory'
++        )
++        self._cmd_vel_pub = self.create_publisher(Twist, '/stretch/cmd_vel', 10)
++
++    def send_arm_trajectory(self, ik_names, ik_states, fps=10.0, is_prealign=False):
++        """Send non-base joints via FollowJointTrajectory, splitting arm into 4."""
++        self.get_logger().info('Connecting to /stretch_controller...')
++        if not self._action_client.wait_for_server(timeout_sec=10.0):
++            return None
++        
++        # Build index map from IK output
++        lift_idx = ik_names.index('joint_lift')
++        arm_idx = ik_names.index('joint_arm_l0')
++        wyaw_idx = ik_names.index('joint_wrist_yaw')
++        wpitch_idx = ik_names.index('joint_wrist_pitch')
++        wroll_idx = ik_names.index('joint_wrist_roll')
++        
++        goal_msg = FollowJointTrajectory.Goal()
++
++        has_gripper = 'gripper_position' in ik_names
++        grip_idx = ik_names.index('gripper_position') if has_gripper else None
++        goal_msg.trajectory.joint_names = ARM_JOINT_NAMES if has_gripper else ARM_JOINT_NAMES[:-1]
++
++        for i, states in enumerate(ik_states):
++            point = JointTrajectoryPoint()
++            arm_per_joint = float(states[arm_idx]) / 4.0
++            positions = [
++                float(states[lift_idx]),
++                arm_per_joint, arm_per_joint, arm_per_joint, arm_per_joint,
++                float(states[wyaw_idx]),
++                float(states[wpitch_idx]),
++                float(states[wroll_idx]),
++            ]
++            if has_gripper:
++                grip_normalized = float(states[grip_idx])
++                grip_aperture = 0.5 - (grip_normalized * 0.8)  # 0→open(0.5), 1→closed(-0.3)
++                positions.append(grip_aperture)
++
++            point.positions = positions
++
++            if is_prealign:
++                point.time_from_start.sec = 4
++                point.time_from_start.nanosec = 0
++            else:
++                t_sec = (i + 1) / fps
++                point.time_from_start.sec = int(t_sec)
++                point.time_from_start.nanosec = int((t_sec % 1) * 1e9)
++            goal_msg.trajectory.points.append(point)
++
++        return self._action_client.send_goal_async(goal_msg)
++
++def load_zarr_joints(zarr_path):
++    root = zarr.open(zarr_path, mode='r')
++    ee_pose = np.array(root['obs/ee_pose'])
++    positions, quaternions = ee_pose[:, :3], ee_pose[:, 3:]
++    timestamps = np.arange(ee_pose.shape[0]) / 10.0
++
++    retargeter = TrajectoryRetargeter()
++    result = retargeter.retarget(positions, quaternions, timestamps)
++    
++    joint_names = list(result['joint_names'])
++    joint_states = result['joint_states']
++    
++    # Append gripper as pass-through
++    if 'obs/gripper_position' in root['obs']:
++        gripper = np.array(root['obs/gripper_position'])  # (N,1)
++        if gripper.ndim == 1:
++            gripper = gripper.reshape(-1, 1)
++        joint_states = np.column_stack([joint_states, gripper])
++        joint_names.append('gripper_position')
++    
++    return joint_names, joint_states
++
++def sanity_check(names, states, fps=10.0):
++    print("\n--- Pre-flight Sanity Check ---")
++    valid = True
++    for i, name in enumerate(names):
++        j_min, j_max = np.min(states[:, i]), np.max(states[:, i])
++        j_vels = np.abs(np.diff(states[:, i])) * fps
++        max_v = np.max(j_vels)
++        print(f"{name:40} | Range: [{j_min:6.2f}, {j_max:6.2f}] | Max Vel: {max_v:6.2f} rad/s")
++        if name == 'joint_lift' and (j_min < 0.1 or j_max > 1.1):
++            print(f"  !! ERROR: Lift exceeds safety bounds [0.1, 1.1]")
++            valid = False
++        if name == 'joint_arm_l0' and (j_min < 0.0 or j_max > 0.52):
++            print(f"  !! ERROR: Arm exceeds safety bounds [0.0, 0.52]")
++            valid = False
++        if max_v > 2.5:
++            print(f"  !! WARNING: {name} velocity ({max_v:.2f}) is very high.")
++    return valid
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument('--zarr', type=str, required=True)
++    parser.add_argument('--speed', type=float, default=0.3)
++    args = parser.parse_args()
++
++    joint_names, joint_states = load_zarr_joints(args.zarr)
++
++    if not sanity_check(joint_names, joint_states):
++        print("\nERROR: Demo failed sanity check. Exiting for safety.")
++        return
++
++    # Extract base indices
++    base_rot_idx = joint_names.index('joint_mobile_base_rotation')
++    base_trans_idx = joint_names.index('joint_mobile_base_translation')
++    fps = 10.0 * args.speed
++
++    rclpy.init()
++    node = RobotReplayNode()
++
++    # --- PRE-ALIGNMENT (arm only) ---
++    print(f"\nMove to START POSE?")
++    input("Press [ENTER] to confirm...")
++
++    pre_future = node.send_arm_trajectory(joint_names, [joint_states[0]], is_prealign=True)
++    if pre_future is None:
++        print("ERROR: Could not connect to /stretch_controller")
++        node.destroy_node(); rclpy.shutdown(); return
++    rclpy.spin_until_future_complete(node, pre_future)
++    result_future = pre_future.result().get_result_async()
++    rclpy.spin_until_future_complete(node, result_future)
++    node.get_logger().info('Aligned. Stabilizing...')
++    time.sleep(1.0)
++
++    # Trajectory (arm via action, base via cmd_vel) ---
++    print(f"\nReady to execute at {args.speed}x speed.")
++    input("Press [ENTER] to PLAY...")
++
++    exec_future = node.send_arm_trajectory(joint_names, joint_states, fps=fps)
++    if exec_future is None:
++        print("ERROR: Could not connect to /stretch_controller")
++        node.destroy_node(); rclpy.shutdown(); return
++
++    # Drive base simultaneously via cmd_vel
++    dt = 1.0 / fps
++    for i in range(len(joint_states)):
++        twist = Twist()
++        if i < len(joint_states) - 1:
++            twist.linear.x = float((joint_states[i+1, base_trans_idx] - joint_states[i, base_trans_idx]) * fps)
++            twist.angular.z = float((joint_states[i+1, base_rot_idx] - joint_states[i, base_rot_idx]) * fps)
++        node._cmd_vel_pub.publish(twist)
++        rclpy.spin_once(node, timeout_sec=0) 
++        time.sleep(dt)
++
++    # Stop base
++    node._cmd_vel_pub.publish(Twist())
++
++    # Wait for arm trajectory to finish
++    rclpy.spin_until_future_complete(node, exec_future)
++    res_future = exec_future.result().get_result_async()
++    rclpy.spin_until_future_complete(node, res_future)
++
++    if res_future.result().status == GoalStatus.STATUS_SUCCEEDED:
++        node.get_logger().info('SUCCESS')
++    else:
++        node.get_logger().error('ABORTED: Check stretch_driver terminal.')
++
++    node.destroy_node()
++    rclpy.shutdown()
++
++if __name__ == '__main__':
++    main()
+\ No newline at end of file
+diff --git a/training/utils/visualize_ik.py b/training/utils/visualize_ik.py
+index 32b5a1f..685a23b 100644
+--- a/training/utils/visualize_ik.py
++++ b/training/utils/visualize_ik.py
+@@ -6,10 +6,11 @@ import time
+ import numpy as np
+ import zarr
+ import logging
++# Suppress MuJoCo warnings and logging
++os.environ['MUJOCO_LOG_LEVEL'] = '0'
+ 
+-# Suppress MuJoCo's internal logging
+-os.environ['MUJOCO_GL'] = 'egl' 
+ logging.getLogger('mujoco').setLevel(logging.ERROR)
++logging.getLogger('stretch_mujoco').setLevel(logging.ERROR)
+ 
+ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ UTILS_DIR = os.path.join(SCRIPT_DIR, '..', 'utils')
+@@ -55,46 +56,60 @@ def replay_in_mujoco(result, speed=1.0):
+     dt = 1.0 / (sync_hz * speed)
+     
+     sim = StretchMujocoSimulator()
++    if hasattr(sim, 'viewer'):
++        sim.viewer.sync() # Force a sync
+     sim.start()
+-    time.sleep(2.0)
++    # Visualize target trajectory
++    retarget_positions = result.get('target_positions')  # we need to pass this through
++    if retarget_positions is not None:
++        step = max(1, len(retarget_positions) // 30)  # ~30 markers
++        for i in range(0, len(retarget_positions), step):
++            p = retarget_positions[i]
++            sim.add_world_frame(position=(float(p[0]), float(p[1]), float(p[2])))
++        print(f"  Drew {len(range(0, len(retarget_positions), step))} trajectory markers")
+ 
+     # Identify indices for command mapping
+     base_rot_idx = JOINT_NAMES.index('joint_mobile_base_rotation')
+     base_trans_idx = JOINT_NAMES.index('joint_mobile_base_translation')
+-    
++
+     try:
+         while True:
+             print("\n" + "="*40 + "\n  READY: Press [ENTER] to play...")
+             input()
++
+             
+             for i in range(n_frames):
+                 loop_start = time.time()
+                 
+-                # 1. COMMAND ARM & WRIST (Direct Position Control)
++                # Move Arm and Wrist
+                 # We skip the base joints here and handle them via velocity
+                 for j, name in enumerate(JOINT_NAMES):
+                     if 'base' not in name:
+                         mj_name = MUJOCO_JOINT_MAP[name]
+                         sim.move_to(mj_name, float(joints[i, j]))
+                 
+-                # 2. COMMAND BASE (Velocity Tracking)
++                # Move Base
+                 try:
+                     curr_x, curr_y, curr_yaw = sim.get_base_pose()
+                     
+-                    # Target states from PROJECTED IK result
+-                    # These start at 0.25 (trans) and 0.0 (yaw)
+                     target_trans = joints[i, base_trans_idx]
+                     target_yaw   = joints[i, base_rot_idx]
+                     
+-                    # Angular velocity control
++                    # Angular velocity
+                     yaw_err = (target_yaw - curr_yaw + np.pi) % (2 * np.pi) - np.pi
+-                    omega = yaw_err * sync_hz * speed 
++                    w = yaw_err * sync_hz * speed 
+ 
+-                    # Linear velocity control (Forward/Backward)
+-                    trans_err = target_trans - curr_x 
+-                    v_lin = trans_err * sync_hz * speed
++                    # Linear velocity — project world pos onto robot heading
++                    curr_forward = curr_x * np.cos(curr_yaw) + curr_y * np.sin(curr_yaw)
++                    trans_err = target_trans - curr_forward
++                    v = trans_err * sync_hz * speed
+ 
+-                    sim.set_base_velocity(v_linear=float(v_lin), v_angular=float(omega))
++                    sim.set_base_velocity(v_linear=float(v), omega=float(w))
++                    
++                    if i % 10 == 0:
++                        print(f"[Frame {i:4d}] "
++                              f"tgt_trans={target_trans:+.4f}  curr_fwd={curr_forward:+.4f}  v_lin={v:+.4f} | "
++                              f"tgt_yaw={target_yaw:+.4f}  curr_yaw={curr_yaw:+.4f}  omega={w:+.4f}")
+                 except Exception as e:
+                     print(f"Sim Error: {e}")
+                 
+@@ -114,7 +129,7 @@ def replay_in_mujoco(result, speed=1.0):
+ def main():
+     parser = argparse.ArgumentParser()
+     parser.add_argument('--zarr', type=str, required=True)
+-    parser.add_argument('--speed', type=float, default=0.25)
++    parser.add_argument('--speed', type=float, default=1.0)
+     args = parser.parse_args()
+     
+     pos, quat, ts = load_ee_pose(args.zarr)
+diff --git a/vtam_core/launch/vtam_record.launch.py b/vtam_core/launch/vtam_record.launch.py
+index c861ba6..2611c04 100644
+--- a/vtam_core/launch/vtam_record.launch.py
++++ b/vtam_core/launch/vtam_record.launch.py
+@@ -1,9 +1,11 @@
++#!/usr/bin/env python3
+ import os
+ from ament_index_python.packages import get_package_share_directory
+ from launch import LaunchDescription
+-from launch.actions import TimerAction, IncludeLaunchDescription
++from launch.actions import TimerAction, IncludeLaunchDescription, RegisterEventHandler, EmitEvent, Shutdown, LogInfo
+ from launch.launch_description_sources import PythonLaunchDescriptionSource
+ from launch_ros.actions import Node
++from launch.event_handlers import OnProcessExit
+ 
+ def generate_launch_description():
+     pkg_share = get_package_share_directory('vtam_core')
+@@ -26,11 +28,14 @@ def generate_launch_description():
+         launch_arguments={
+             'serial_no': '_128422270608',
+             'camera_name': 'camera_arm',
++            # MINIMUM RESOLUTION for Wrist
++            'rgb_camera.color_profile': '424x240x30', 
+             'rgb_camera.enable_auto_exposure': 'true',
+             'rgb_camera.auto_exposure_priority': 'false',
+-        }.items()
++        }.items(),
+     )
+-    # Head Camera (D435i) - publishes TF starting from camera_bottom_screw_frame
++
++    # Head Camera (D435i)
+     camera_head = TimerAction(
+         period=3.0,
+         actions=[
+@@ -46,13 +51,13 @@ def generate_launch_description():
+                     'camera_namespace': '',
+                     'base_frame_id': 'camera_bottom_screw_frame',
+                     'unite_imu_method': '0',
+-                    'rgb_camera.color_profile': '1280x720x60',
++                    'rgb_camera.color_profile': '640x480x60', 
+                 }.items()
+             )
+         ]
+     )
+ 
+-    # Robot state publisher - publishes TF from URDF
++    # Robot state publisher
+     robot_state_publisher_node = Node(
+         package='robot_state_publisher',
+         executable='robot_state_publisher',
+@@ -89,14 +94,28 @@ def generate_launch_description():
+         output='screen'
+     )
+ 
+-    # record node
++    terminate_on_eflesh_exit = RegisterEventHandler(
++        OnProcessExit(
++            target_action=eflesh_node,
++            on_exit=[
++                # Print error message
++                LogInfo(msg="\n" + "="*50 + 
++                            "\nERROR: Adafruit QT Py (UMI Sensor) not found on /dev/serial/by-id/..." +
++                            "\nCHECK: Is the USB cable plugged in?" +
++                            "\n" + "="*50 + "\n"),
++                
++                # Trigger the shutdown
++                Shutdown(reason='Hardware missing')
++            ]
++        )
++    )
++
++    # Record node
+     record_node = Node(
+         package='vtam_core',
+         executable='record_node',
+         output='screen'
+     )
+-
+-
+     
+     return LaunchDescription([
+         robot_state_publisher_node,
+@@ -104,6 +123,7 @@ def generate_launch_description():
+         camera_head,
+         umi_detector_node,
+         eflesh_node,
++        terminate_on_eflesh_exit,
+         vtam_robot_node,
+         record_node   
+-        ])
+\ No newline at end of file
++    ])
+\ No newline at end of file
+diff --git a/vtam_core/vtam_core/drivers/umi_detector_node.py b/vtam_core/vtam_core/drivers/umi_detector_node.py
+index 112640f..ea42fb8 100644
+--- a/vtam_core/vtam_core/drivers/umi_detector_node.py
++++ b/vtam_core/vtam_core/drivers/umi_detector_node.py
+@@ -289,7 +289,7 @@ class UmiDetectorNode(Node):
+ 
+         except Exception as e:
+             # This ensures that if TF fails the loop doesn't crash,
+-            self.get_logger(f"TF lookup waiting: {e}")
++            self.get_logger().debug(f"TF lookup waiting: {e}")
+             return
+ 
+     def broadcast_frame_quat(self, name, pos, quat, parent):
+diff --git a/vtam_core/vtam_core/nodes/record_node.py b/vtam_core/vtam_core/nodes/record_node.py
+index 5893f12..1a2a522 100644
+--- a/vtam_core/vtam_core/nodes/record_node.py
++++ b/vtam_core/vtam_core/nodes/record_node.py
+@@ -162,9 +162,9 @@ class RecordDemoNode(Node):
+ 
+             topics = [
+                 "/sync_pulse", "/tf", "/tf_static", "/umi_trajectory",
+-                "/camera/color/image_raw/compressed", "/camera/color/camera_info",
++                # "/camera/color/image_raw/compressed", "/camera/color/camera_info",
+                 "/camera_arm/color/image_rect_raw/compressed", "/camera_arm/color/camera_info",
+-                 "/tactile_gripper_controller"
++                 "/tactile_gripper_controller", "/joint_states", "/gripper_width_normalized",
+             ]
+ 
+             cmd = [
+diff --git a/vtam_core/vtam_core/nodes/robot_node.py b/vtam_core/vtam_core/nodes/robot_node.py
+index b09db0b..22ccee5 100644
+--- a/vtam_core/vtam_core/nodes/robot_node.py
++++ b/vtam_core/vtam_core/nodes/robot_node.py
+@@ -1,80 +1,106 @@
+ #!/usr/bin/env python3
+ import rclpy
+ from rclpy.node import Node
++import threading
+ from sensor_msgs.msg import JointState
+ from tf2_ros import TransformListener, Buffer, TransformBroadcaster
+-from geometry_msgs.msg import TransformStamped
+ import stretch_body.robot as rb
+ import time
+-from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
+ from vtam_core.nodes.umi_gripper_node import GripperController
+ from vtam_core.umi_pose_tracker import HeadPoseTracker
+ 
+-# Add these imports
+-try:
+-    from tf_transformations import quaternion_multiply, quaternion_from_euler
+-except ImportError:
+-    from scipy.spatial.transform import Rotation as R
+-    def quaternion_from_euler(roll, pitch, yaw):
+-        r = R.from_euler('xyz', [roll, pitch, yaw])
+-        return r.as_quat()
+-    def quaternion_multiply(q1, q2):
+-        r1 = R.from_quat(q1)
+-        r2 = R.from_quat(q2)
+-        return (r1 * r2).as_quat()
+-
+ class VtamControlLoop(Node):
+     def __init__(self):
+         super().__init__('vtam_control_loop')
++        self.get_logger().info('Initializing Multi-Threaded 50Hz/30Hz VTAM Loop...')
+         
+-        self.get_logger().info('Initializing VTAM Control Loop...')
+-        
+-        # 1. Hardware
++        # 1. Hardware Connection
+         try:
+             self.robot = rb.Robot()
+-            self.robot.startup()
++            if not self.robot.startup():
++                self.get_logger().error('Hardware locked! Run "stretch_free_robot_process.py"')
++                raise RuntimeError("Hardware Lock")
+             self.get_logger().info('Stretch robot connected successfully')
+         except Exception as e:
+-            self.get_logger().error(f'Failed to connect to robot: {e}')
++            self.get_logger().error(f'Failed to connect: {e}')
+             raise
+ 
+-        # 2. TF Infrastructure
++        # 2. Infrastructure
+         self.tf_buffer = Buffer()
+         self.tf_listener = TransformListener(self.tf_buffer, self)
+-        self.tf_broadcaster = TransformBroadcaster(self)
+-
+-        self.last_warning_time = 0
+-
+-        self.gripper_controller = GripperController(self, self.robot)
+-        
+         self.js_pub = self.create_publisher(JointState, '/joint_states', 10)
+-        self.create_timer(0.02, self.control_tick)
+-
+         self.sync_pub = self.create_publisher(JointState, '/sync_pulse', 10)
+ 
+-        self.create_timer(0.1, self.publish_sync_pulse)
+-
++        # 3. Controllers & Tracker
++        self.gripper_controller = GripperController(self, self.robot)
+         self.head_tracker = HeadPoseTracker(self, self.robot)
++
++        # 4. State Management
++        self.tick_count = 0
++        self.lock = threading.Lock() # Prevents thread collision on the robot object
++        
++        # 5. ASYNC TRACKER THREAD
++        # Moving the tracker here prevents its 60ms spikes from killing the 30Hz sync
++        self.tracker_thread = threading.Thread(target=self._tracker_loop, daemon=True)
++        self.tracker_thread.start()
++
++        # 6. MASTER CONTROL TIMER (50Hz / 0.02s)
++        self.create_timer(0.02, self.control_tick)
+         
+-        self.get_logger().info('VTAM Control Loop ready')
++        self.get_logger().info('VTAM System Ready: Tracking decoupled from Synchronization.')
++
++    def _tracker_loop(self):
++        """Dedicated background thread for EE pose tracking."""
++        # This loop runs as fast as the CPU allows without blocking the heartbeat
++        self.get_logger().info('Async Tracker Thread Started')
++        while rclpy.ok():
++            try:
++                with self.lock:
++                    # Tracker is essential for EE poses, so we run it constantly
++                    self.head_tracker.tick()
++                # Tiny sleep to prevent 100% CPU burn-up
++                time.sleep(0.001)
++            except Exception as e:
++                self.get_logger().error(f"Tracker thread error: {e}")
+ 
+     def control_tick(self):
+-        self.robot.pull_status()
+-        self.gripper_controller.tick()
+-        self.head_tracker.tick()
++        """High-priority heartbeat for hardware and data logging."""
++        start_time = self.get_clock().now()
+         
+-        self.robot.push_command()
+-        self.publish_js()
++        try:
++            with self.lock:
++                # 1. Hardware Reflexes (50Hz)
++                self.robot.pull_status()
++                self.gripper_controller.tick()
++                self.robot.push_command()
++                self.publish_js()
++
++            # 2. Data Sync Pulse (~30Hz)
++            # We pulse 3 times every 5 ticks (3/5 * 50 = 30Hz)
++            self.tick_count += 1
++            if self.tick_count % 5 in [1, 3, 5]: 
++                self.publish_sync_pulse()
++            
++            if self.tick_count >= 5:
++                self.tick_count = 0
++
++            # 3. Performance Monitor
++            duration = (self.get_clock().now() - start_time).nanoseconds / 1e6
++            if duration > 20.0:
++                self.get_logger().debug(f"Jitter detected: {duration:.2f}ms")
++
++        except Exception as e:
++            self.get_logger().error(f"Control loop failure: {e}")
+ 
+     def publish_sync_pulse(self):
+-        """The heartbeat that tells cameras and eFlesh to 'snap' their data"""
++        """The heartbeat that tells cameras to 'snap' their data."""
+         msg = JointState()
+         msg.header.stamp = self.get_clock().now().to_msg()
+         msg.header.frame_id = "master_clock"
+-        # Optional: Include the latest robot poses in this heartbeat to save bandwidth
+         self.sync_pub.publish(msg)
+ 
+     def publish_js(self):
++        """Publishes JointStates for RViz and TF tree."""
+         msg = JointState()
+         msg.header.stamp = self.get_clock().now().to_msg()
+         msg.name = [
+@@ -84,28 +110,31 @@ class VtamControlLoop(Node):
+             'joint_gripper_finger_left', 'joint_gripper_finger_right'
+         ]
+         
+-        h = self.robot.head.status
+-        a = self.robot.arm.status
+-        l = self.robot.lift.status
+-        w = self.robot.end_of_arm.status
++        h, a, l, w = self.robot.head.status, self.robot.arm.status, self.robot.lift.status, self.robot.end_of_arm.status
++        arm_p = a.get('pos', 0.0)
+         
+-        arm_p = a['pos']
+-        msg.position = [
+-            float(h['head_pan']['pos']), float(h['head_tilt']['pos']), float(l['pos']),
+-            float(arm_p/4), float(arm_p/4), float(arm_p/4), float(arm_p/4),
+-            float(w['wrist_yaw']['pos']), float(w['wrist_pitch']['pos']), 
+-            float(w['wrist_roll']['pos']),
+-            float(w['stretch_gripper']['pos']), float(w['stretch_gripper']['pos'])
+-        ]
+-        self.js_pub.publish(msg)
+-    
++        try:
++            msg.position = [
++                float(h.get('head_pan', {}).get('pos', 0.0)),
++                float(h.get('head_tilt', {}).get('pos', 0.0)),
++                float(l.get('pos', 0.0)),
++                float(arm_p/4), float(arm_p/4), float(arm_p/4), float(arm_p/4),
++                float(w.get('wrist_yaw', {}).get('pos', 0.0)),
++                float(w.get('wrist_pitch', {}).get('pos', 0.0)), 
++                float(w.get('wrist_roll', {}).get('pos', 0.0)),
++                float(w.get('stretch_gripper', {}).get('pos', 0.0)),
++                float(w.get('stretch_gripper', {}).get('pos', 0.0))
++            ]
++            self.js_pub.publish(msg)
++        except Exception:
++            pass
++
+     def shutdown(self):
+-        """Clean shutdown"""
+-        self.get_logger().info('Shutting down robot...')
++        self.get_logger().info('Emergency Shutdown...')
+         try:
+             self.robot.stop()
+-        except Exception as e:
+-            self.get_logger().error(f'Error during robot shutdown: {e}')
++        except:
++            pass
+ 
+ def main():
+     rclpy.init()
+diff --git a/vtam_core/vtam_core/umi_pose_tracker.py b/vtam_core/vtam_core/umi_pose_tracker.py
+index c5db1e9..54421ec 100644
+--- a/vtam_core/vtam_core/umi_pose_tracker.py
++++ b/vtam_core/vtam_core/umi_pose_tracker.py
+@@ -94,7 +94,7 @@ class HeadPoseTracker:
+     def _lookup_target(self):
+         try:
+             t = self.node.tf_buffer.lookup_transform(
+-                'link_head', 'fiducial_cube', Time(seconds=0), timeout=Duration(seconds=0.01)
++                'link_head', 'umi_gripper', Time(seconds=0), timeout=Duration(seconds=0.01)
+             )
+             tr = t.transform.translation
+             return (tr.x, tr.y, tr.z)

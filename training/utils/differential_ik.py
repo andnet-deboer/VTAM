@@ -109,7 +109,7 @@ class TrajectoryRetargeter:
             0.0,    # base rotation — centered
             0.0,    # base translation — centered
             0.89,   # lift — tabletop height (from dex_teleop)
-            0.10,   # arm extension — nearly retracted, max room to extend
+            0.05,   # arm extension — nearly retracted, max room to extend
             0.0,    # wrist yaw — centered
             0.0,    # wrist pitch — centered
             0.0,    # wrist roll — centered
@@ -222,52 +222,54 @@ class TrajectoryRetargeter:
         q_seed = np.median(frames, axis=0)
         print(f"  Computed seed from {len(frames)} frames.")
         return q_seed
-    
         
     def project_to_workspace(self, positions, quaternions):
         """
         Anchors the trajectory so the first frame is exactly at the robot's neutral stance.
-        This preserves the relative movement and prevents the 400mm+ IK jump.
+        Corrects for axis permutations between the demo sensor and ROS/Stretch conventions.
         """
-        # Capture the starting point of the human demonstration
+        # 1. Capture the starting point of the human demonstration
         anchor_pos = positions[0]
-        anchor_quat = quaternions[0]
+        R_anchor = Rotation.from_quat(quaternions[0])
+        R_anchor_inv = R_anchor.inv()
         
-        #  Identify the Robot's physical 'Neutral' fingertip pose (FK of neutral_q)
-        # This is where the robot is physically standing in MuJoCo/Real-Life.
+        # 2. Identify the Robot's physical 'Neutral' fingertip pose
         neutral_pos, neutral_rot = self.forward_kinematics(self.neutral_q)
-        neutral_quat = Rotation.from_matrix(neutral_rot).as_quat()
+        R_neutral = Rotation.from_matrix(neutral_rot)
 
-        # Calculate the coordinate transform to bridge the gap
-        # T_transform maps the human demo start to the robot neutral start
-        T_transform = np.eye(4)
-        T_transform[:3, 3] = neutral_pos - anchor_pos
+        # 3. Calculate alignment rotation
+        # Use 'zyx' (Yaw, Pitch, Roll) to safely extract yaw without axis bleeding
+        yaw_demo = R_anchor.as_euler('zyx')[0]
+        yaw_robot = R_neutral.as_euler('zyx')[0]
+        
+        # Base alignment + your working 90-degree correction
+        yaw_align = yaw_robot - yaw_demo
+        correction_angle = -np.pi / 2 
+        R_align = Rotation.from_euler('z', yaw_align + correction_angle)
 
         local_positions = np.zeros_like(positions)
         local_quaternions = np.zeros_like(quaternions)
 
-        # Capture the initial rotation as the 'zero' reference
-        R_anchor_inv = Rotation.from_quat(anchor_quat).inv()
-        R_neutral = Rotation.from_quat(neutral_quat)
-
-        # Demo frame to Robot frame
-        R_anchor = Rotation.from_quat(anchor_quat)
-        R_align_full = R_neutral * R_anchor.inv()
-
-        # Extract only the yaw (Z-rotation), discard pitch/roll
-        yaw_only = R_align_full.as_euler('xyz')[2]
-        R_align = Rotation.from_euler('z', yaw_only)
-
         for i in range(len(positions)):
-            # Displacement
+            # --- DISPLACEMENT ---
+            # Rotate the path vector and anchor it to the robot's hand
             local_positions[i] = neutral_pos + R_align.apply(positions[i] - anchor_pos)
             
-            # Calculate UMI's rotation change
+            # --- ORIENTATION ---
+            # Find the local rotation change from the demo
             R_rel = Rotation.from_quat(quaternions[i]) * R_anchor_inv
             
-            # Apply the rotation change in front of the neutral pose
-            # This maps "Hand-Yaw" directly to "Robot-Yaw" regardless of starting tilt.
-            local_quaternions[i] = (R_neutral * R_rel).as_quat()
+            # Change of basis: transform the relative rotation into our new -90 rotated frame
+            R_rel_aligned = R_align * R_rel * R_align.inv()
+            
+            # Apply the synchronized relative rotation to the robot's starting orientation
+            local_quaternions[i] = (R_neutral * R_rel_aligned).as_quat()
+
+        # Generate T_transform for reference 
+        # (Reminder: DO NOT apply this to the base in MuJoCo if you are plotting local_positions!)
+        T_transform = np.eye(4)
+        T_transform[:3, :3] = R_align.as_matrix()
+        T_transform[:3, 3] = neutral_pos - R_align.apply(anchor_pos)
 
         return local_positions, local_quaternions, T_transform
     
@@ -333,7 +335,22 @@ class TrajectoryRetargeter:
         # Reorder from MR convention [w, v] to pinocchio convention [v, w]
         return np.concatenate([error[3:], error[:3]])
     
-    def weighted_dls_solve(self, J, e):
+    def _dynamic_weights(self, q_current, target_pos):
+        """Lower base weight when target is far, lock it when within reach."""
+        ee_pos, _ = self.forward_kinematics(q_current)
+        dist = np.linalg.norm(target_pos - ee_pos)
+        
+        arm_reach = 0.52  # max extension
+        w = self.joint_weights.copy()
+        if dist > arm_reach * 0.6:
+            w[0] = 0.1   # base rotation — very cheap
+            w[1] = 0.05   # base translation — very cheap
+        else:
+            w[0] = 5.0   # lock rotation
+            w[1] = 5.0   # lock translation
+        return w
+    
+    def weighted_dls_solve(self, J, e, weights=None):
         """
         Weighted damped least-squares solve.
         
@@ -346,7 +363,9 @@ class TrajectoryRetargeter:
         Returns:
             dq: (6,) joint displacement
         """
-        W_inv = np.diag(1.0 / self.joint_weights)
+        if weights is None:
+            weights = self.joint_weights
+        W_inv = np.diag(1.0 / weights)
         JWinv = J @ W_inv
         A = JWinv @ J.T + (self.damping ** 2) * np.eye(6)
         dq = W_inv @ J.T @ np.linalg.solve(A, e)
@@ -383,7 +402,8 @@ class TrajectoryRetargeter:
         J = self.compute_jacobian(q_current)
 
         # Weighted DLS solve
-        dq = self.weighted_dls_solve(J, e)
+        weights = self._dynamic_weights(q_current, target_pos)
+        dq = self.weighted_dls_solve(J, e, weights=weights)
 
         # Clamp
         dq = self.clamp_joint_step(dq)
@@ -444,24 +464,27 @@ class TrajectoryRetargeter:
 
         print("\n=== RETARGETING DEBUG ===")
         print(f"Raw position[0]: {positions[0]}")
-        print(f"Raw quaternion[0]: {quaternions[0]}")
 
-        # Adapt neutral lift height from demo's starting pose
-        neutral_q = self.neutral_q.copy()  
-        cfg = self.analytical_solver.solve_single(positions[0], quaternions[0])
-        if cfg is not None and 'joint_lift' in cfg:
-            lift_idx = self.JOINT_NAMES.index('joint_lift')
-            neutral_q[lift_idx] = np.clip(cfg['joint_lift'], 0.0, 1.1)
-            print(f"  Adapted neutral lift from demo: {neutral_q[lift_idx]:.3f} m")
+        # 1. Get the Median Z height from the first few demo frames directly (No IK needed)
+        seed_count = min(self.seed_frames, len(positions))
+        raw_median_z = np.median(positions[:seed_count, 2])
+        
+        # 2. Set the neutral lift carriage height (adjusting for the 0.097m gripper offset)
+        # This solves the "15cm jump" by anchoring to the demo's actual height
+        neutral_q = self.neutral_q.copy()
+        lift_idx = self.JOINT_NAMES.index('joint_lift')
+        neutral_q[lift_idx] = np.clip(raw_median_z - 0.097, 0.0, 1.1)
         self.neutral_q = neutral_q
 
-        # Stage 0: Project trajectory into robot workspace
+        # 3. NOW project the trajectory (this shifts the path so the robot can reach it)
         positions, quaternions, T_transform = self.project_to_workspace(positions, quaternions)
 
+        # 4. NOW compute the seed (this will work now because the frames are within reach)
+        q_seed = self.compute_seed(positions, quaternions)
+        
         print(f"\nAfter workspace projection:")
         print(f"  Projected position[0]: {positions[0]}")
-        print(f"  Neutral config: {self.neutral_q}")
-        print(f"  Joint names: {self.JOINT_NAMES}")
+        print(f"  Neutral config (Anchor): {self.neutral_q}")
 
         # Stage 1: Seed with analytical IK median
         q_seed = self.neutral_q.copy()

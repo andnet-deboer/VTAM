@@ -1,9 +1,11 @@
+#!/usr/bin/env python3
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import TimerAction, IncludeLaunchDescription
+from launch.actions import TimerAction, IncludeLaunchDescription, RegisterEventHandler, EmitEvent, Shutdown, LogInfo
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
+from launch.event_handlers import OnProcessExit
 
 def generate_launch_description():
     pkg_share = get_package_share_directory('vtam_core')
@@ -26,11 +28,14 @@ def generate_launch_description():
         launch_arguments={
             'serial_no': '_128422270608',
             'camera_name': 'camera_arm',
+            # MINIMUM RESOLUTION for Wrist
+            'rgb_camera.color_profile': '424x240x30', 
             'rgb_camera.enable_auto_exposure': 'true',
             'rgb_camera.auto_exposure_priority': 'false',
-        }.items()
+        }.items(),
     )
-    # Head Camera (D435i) - publishes TF starting from camera_bottom_screw_frame
+
+    # Head Camera (D435i)
     camera_head = TimerAction(
         period=3.0,
         actions=[
@@ -46,13 +51,13 @@ def generate_launch_description():
                     'camera_namespace': '',
                     'base_frame_id': 'camera_bottom_screw_frame',
                     'unite_imu_method': '0',
-                    'rgb_camera.color_profile': '1280x720x60',
+                    'rgb_camera.color_profile': '640x480x60', 
                 }.items()
             )
         ]
     )
 
-    # Robot state publisher - publishes TF from URDF
+    # Robot state publisher
     robot_state_publisher_node = Node(
         package='robot_state_publisher',
         executable='robot_state_publisher',
@@ -89,14 +94,28 @@ def generate_launch_description():
         output='screen'
     )
 
-    # record node
+    terminate_on_eflesh_exit = RegisterEventHandler(
+        OnProcessExit(
+            target_action=eflesh_node,
+            on_exit=[
+                # Print error message
+                LogInfo(msg="\n" + "="*50 + 
+                            "\nERROR: Adafruit QT Py (UMI Sensor) not found on /dev/serial/by-id/..." +
+                            "\nCHECK: Is the USB cable plugged in?" +
+                            "\n" + "="*50 + "\n"),
+                
+                # Trigger the shutdown
+                Shutdown(reason='Hardware missing')
+            ]
+        )
+    )
+
+    # Record node
     record_node = Node(
         package='vtam_core',
         executable='record_node',
         output='screen'
     )
-
-
     
     return LaunchDescription([
         robot_state_publisher_node,
@@ -104,6 +123,7 @@ def generate_launch_description():
         camera_head,
         umi_detector_node,
         eflesh_node,
+        terminate_on_eflesh_exit,
         vtam_robot_node,
         record_node   
-        ])
+    ])

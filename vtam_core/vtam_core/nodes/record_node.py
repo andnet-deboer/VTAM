@@ -162,9 +162,9 @@ class RecordDemoNode(Node):
 
             topics = [
                 "/sync_pulse", "/tf", "/tf_static", "/umi_trajectory",
-                "/camera/color/image_raw/compressed", "/camera/color/camera_info",
+                # "/camera/color/image_raw/compressed", "/camera/color/camera_info",
                 "/camera_arm/color/image_rect_raw/compressed", "/camera_arm/color/camera_info",
-                 "/tactile_gripper_controller"
+                 "/tactile_gripper_controller", "/joint_states", "/gripper_width_normalized",
             ]
 
             cmd = [

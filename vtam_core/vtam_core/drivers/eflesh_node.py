@@ -77,34 +77,35 @@ class EFleshNode(Node):
         # --- Parameters ---
         self.declare_parameter('umi_gripper',
             '/dev/serial/by-id/usb-Adafruit_QT_Py_M0_13CEB8D550555450382E3120FF140A34-if00')
-
+        self.declare_parameter('left_finger', '/dev/serial/by-id/usb-Adafruit_QT_Py_M0_6DE50CD050555450382E3120FF121544-if00')
+        self.declare_parameter('right_finger', '/dev/serial/by-id/usb-Adafruit_QT_Py_M0_ADFE7C8B50584C43322E3120FF0F241E-if00')
+        
         port_umi = self.get_parameter('umi_gripper').get_parameter_value().string_value
+        port_left = self.get_parameter('left_finger').get_parameter_value().string_value
+        port_right = self.get_parameter('right_finger').get_parameter_value().string_value
 
         # --- Publishers ---
         self.pub_left = self.create_publisher(Float32MultiArray, '/tactile_left', 10)
         self.pub_right = self.create_publisher(Float32MultiArray, '/tactile_right', 10)
         self.pub_umi = self.create_publisher(Float32MultiArray, '/tactile_gripper_controller', 10)
 
-        self.stream_left = None
-        self.stream_right = None
-
         # --- Serial Reader (replaces AnySkinProcess) ---
         self.get_logger().info(f'Connecting UMI Controller Sensor on: {port_umi}')
         self.reader = SkinSerialReader(port=port_umi)
         self.reader.start()
 
-        # --- Calibration ---
-        self.get_logger().info('Waiting for sensors to settle (3s)...')
-        time.sleep(3.0)
+        # --- Initialize Left and Right Readers ---
+        self.reader_left = SkinSerialReader(port=port_left)
+        self.reader_right = SkinSerialReader(port=port_right)
+        
+        self.reader_left.start()
+        self.reader_right.start()
 
+        # --- Update Calibration to handle all three ---
         self.get_logger().info('Calibrating Baselines...')
-        self.baseline_umi = self._calibrate()
-
-        if self.baseline_umi is None:
-            self.get_logger().error('Failed to calibrate sensors. Exiting.')
-            raise SystemExit
-
-        self.get_logger().info('Calibration Complete.')
+        self.baseline_umi = self._calibrate(self.reader)   # Pass the reader here
+        self.baseline_left = self._calibrate(self.reader_left)
+        self.baseline_right = self._calibrate(self.reader_right)
 
         # --- Record Service Client ---
         self.record_client = self.create_client(SetBool, 'record_demo')
@@ -124,11 +125,11 @@ class EFleshNode(Node):
         )
         self.get_logger().info('✓ EFlesh Node Latched to Master 10Hz Clock')
 
-    def _calibrate(self, samples=50):
-        """Collect samples and compute baseline mean."""
+    def _calibrate(self, reader, samples=50):   
+        """Updated to accept the specific reader instance"""
         collected = []
-        for _ in range(samples * 20):
-            data, _ = self.reader.get_data()
+        for _ in range(100):
+            data, _ = reader.get_data()
             if data is not None:
                 collected.append(data)
                 if len(collected) >= samples:
@@ -149,23 +150,29 @@ class EFleshNode(Node):
 
     def sync_callback(self, pulse_msg):
         """
-        Triggered exactly when the Robot Node says 'Go'.
-        Latching at 10Hz keeps jitter under 10ms for Diffusion Policy.
+        Triggered by the Robot node
         """
-        data, button = self.reader.get_data()
+        # Grab raw data from all three readers
+        data_u, button = self.reader.get_data()
+        data_l, _ = self.reader_left.get_data()
+        data_r, _ = self.reader_right.get_data()
 
-        # Publish tactile data
-        if data is not None:
-            corrected = data - self.baseline_umi
-            # Strip temperature: each mag is [t, x, y, z], keep only [x, y, z]
-            reshaped = corrected.reshape(5, 4)
-            xyz_only = reshaped[:, 1:].flatten()  # 15 values
-            msg = self.create_msg(xyz_only)
-            self.pub_umi.publish(msg)
+        # Minimal helper to process and publish
+        def process_and_pub(raw_data, baseline, publisher):
+            if raw_data is not None and baseline is not None:
+                corrected = raw_data - baseline
+                # Strip temperature: each mag is [t, x, y, z], keep only [x, y, z]
+                reshaped = corrected.reshape(5, 4)
+                xyz_only = reshaped[:, 1:].flatten()  # 15 values
+                publisher.publish(self.create_msg(xyz_only))
 
-        # Only check button after system is fully initialized
+        # Execute for each sensor
+        process_and_pub(data_u, self.baseline_umi, self.pub_umi)
+        process_and_pub(data_l, self.baseline_left, self.pub_left)
+        process_and_pub(data_r, self.baseline_right, self.pub_right)
+
+        # Button Logic \
         if self.button_armed:
-            # Detect rising edge: button went 0 -> 1
             if button == 1 and self.prev_button == 0:
                 self.toggle_recording()
             self.prev_button = button
@@ -193,13 +200,9 @@ class EFleshNode(Node):
             self.get_logger().error(f'Service call failed: {e}')
 
     def destroy_node(self):
-        if self.stream_left:
-            self.stream_left.pause_streaming()
-            self.stream_left.join()
-        if self.stream_right:
-            self.stream_right.pause_streaming()
-            self.stream_right.join()
         self.reader.stop()
+        self.reader_left.stop()
+        self.reader_right.stop()
         super().destroy_node()
 
 

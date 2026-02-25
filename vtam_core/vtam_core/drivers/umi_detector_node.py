@@ -289,7 +289,7 @@ class UmiDetectorNode(Node):
 
         except Exception as e:
             # This ensures that if TF fails the loop doesn't crash,
-            self.get_logger(f"TF lookup waiting: {e}")
+            self.get_logger().debug(f"TF lookup waiting: {e}")
             return
 
     def broadcast_frame_quat(self, name, pos, quat, parent):

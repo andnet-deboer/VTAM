@@ -1,80 +1,106 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
+import threading
 from sensor_msgs.msg import JointState
 from tf2_ros import TransformListener, Buffer, TransformBroadcaster
-from geometry_msgs.msg import TransformStamped
 import stretch_body.robot as rb
 import time
-from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
 from vtam_core.nodes.umi_gripper_node import GripperController
 from vtam_core.umi_pose_tracker import HeadPoseTracker
-
-# Add these imports
-try:
-    from tf_transformations import quaternion_multiply, quaternion_from_euler
-except ImportError:
-    from scipy.spatial.transform import Rotation as R
-    def quaternion_from_euler(roll, pitch, yaw):
-        r = R.from_euler('xyz', [roll, pitch, yaw])
-        return r.as_quat()
-    def quaternion_multiply(q1, q2):
-        r1 = R.from_quat(q1)
-        r2 = R.from_quat(q2)
-        return (r1 * r2).as_quat()
 
 class VtamControlLoop(Node):
     def __init__(self):
         super().__init__('vtam_control_loop')
+        self.get_logger().info('Initializing Multi-Threaded 50Hz/30Hz VTAM Loop...')
         
-        self.get_logger().info('Initializing VTAM Control Loop...')
-        
-        # 1. Hardware
+        # 1. Hardware Connection
         try:
             self.robot = rb.Robot()
-            self.robot.startup()
+            if not self.robot.startup():
+                self.get_logger().error('Hardware locked! Run "stretch_free_robot_process.py"')
+                raise RuntimeError("Hardware Lock")
             self.get_logger().info('Stretch robot connected successfully')
         except Exception as e:
-            self.get_logger().error(f'Failed to connect to robot: {e}')
+            self.get_logger().error(f'Failed to connect: {e}')
             raise
 
-        # 2. TF Infrastructure
+        # 2. Infrastructure
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
-        self.tf_broadcaster = TransformBroadcaster(self)
-
-        self.last_warning_time = 0
-
-        self.gripper_controller = GripperController(self, self.robot)
-        
         self.js_pub = self.create_publisher(JointState, '/joint_states', 10)
-        self.create_timer(0.02, self.control_tick)
-
         self.sync_pub = self.create_publisher(JointState, '/sync_pulse', 10)
 
-        self.create_timer(0.1, self.publish_sync_pulse)
-
+        # 3. Controllers & Tracker
+        self.gripper_controller = GripperController(self, self.robot)
         self.head_tracker = HeadPoseTracker(self, self.robot)
+
+        # 4. State Management
+        self.tick_count = 0
+        self.lock = threading.Lock() # Prevents thread collision on the robot object
         
-        self.get_logger().info('VTAM Control Loop ready')
+        # 5. ASYNC TRACKER THREAD
+        # Moving the tracker here prevents its 60ms spikes from killing the 30Hz sync
+        self.tracker_thread = threading.Thread(target=self._tracker_loop, daemon=True)
+        self.tracker_thread.start()
+
+        # 6. MASTER CONTROL TIMER (50Hz / 0.02s)
+        self.create_timer(0.02, self.control_tick)
+        
+        self.get_logger().info('VTAM System Ready: Tracking decoupled from Synchronization.')
+
+    def _tracker_loop(self):
+        """Dedicated background thread for EE pose tracking."""
+        # This loop runs as fast as the CPU allows without blocking the heartbeat
+        self.get_logger().info('Async Tracker Thread Started')
+        while rclpy.ok():
+            try:
+                with self.lock:
+                    # Tracker is essential for EE poses, so we run it constantly
+                    self.head_tracker.tick()
+                # Tiny sleep to prevent 100% CPU burn-up
+                time.sleep(0.001)
+            except Exception as e:
+                self.get_logger().error(f"Tracker thread error: {e}")
 
     def control_tick(self):
-        self.robot.pull_status()
-        self.gripper_controller.tick()
-        self.head_tracker.tick()
+        """High-priority heartbeat for hardware and data logging."""
+        start_time = self.get_clock().now()
         
-        self.robot.push_command()
-        self.publish_js()
+        try:
+            with self.lock:
+                # 1. Hardware Reflexes (50Hz)
+                self.robot.pull_status()
+                self.gripper_controller.tick()
+                self.robot.push_command()
+                self.publish_js()
+
+            # 2. Data Sync Pulse (~30Hz)
+            # We pulse 3 times every 5 ticks (3/5 * 50 = 30Hz)
+            self.tick_count += 1
+            if self.tick_count % 5 in [1, 3, 5]: 
+                self.publish_sync_pulse()
+            
+            if self.tick_count >= 5:
+                self.tick_count = 0
+
+            # 3. Performance Monitor
+            duration = (self.get_clock().now() - start_time).nanoseconds / 1e6
+            if duration > 20.0:
+                self.get_logger().debug(f"Jitter detected: {duration:.2f}ms")
+
+        except Exception as e:
+            self.get_logger().error(f"Control loop failure: {e}")
 
     def publish_sync_pulse(self):
-        """The heartbeat that tells cameras and eFlesh to 'snap' their data"""
+        """The heartbeat that tells cameras to 'snap' their data."""
         msg = JointState()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = "master_clock"
-        # Optional: Include the latest robot poses in this heartbeat to save bandwidth
         self.sync_pub.publish(msg)
 
     def publish_js(self):
+        """Publishes JointStates for RViz and TF tree."""
         msg = JointState()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.name = [
@@ -84,28 +110,31 @@ class VtamControlLoop(Node):
             'joint_gripper_finger_left', 'joint_gripper_finger_right'
         ]
         
-        h = self.robot.head.status
-        a = self.robot.arm.status
-        l = self.robot.lift.status
-        w = self.robot.end_of_arm.status
+        h, a, l, w = self.robot.head.status, self.robot.arm.status, self.robot.lift.status, self.robot.end_of_arm.status
+        arm_p = a.get('pos', 0.0)
         
-        arm_p = a['pos']
-        msg.position = [
-            float(h['head_pan']['pos']), float(h['head_tilt']['pos']), float(l['pos']),
-            float(arm_p/4), float(arm_p/4), float(arm_p/4), float(arm_p/4),
-            float(w['wrist_yaw']['pos']), float(w['wrist_pitch']['pos']), 
-            float(w['wrist_roll']['pos']),
-            float(w['stretch_gripper']['pos']), float(w['stretch_gripper']['pos'])
-        ]
-        self.js_pub.publish(msg)
-    
+        try:
+            msg.position = [
+                float(h.get('head_pan', {}).get('pos', 0.0)),
+                float(h.get('head_tilt', {}).get('pos', 0.0)),
+                float(l.get('pos', 0.0)),
+                float(arm_p/4), float(arm_p/4), float(arm_p/4), float(arm_p/4),
+                float(w.get('wrist_yaw', {}).get('pos', 0.0)),
+                float(w.get('wrist_pitch', {}).get('pos', 0.0)), 
+                float(w.get('wrist_roll', {}).get('pos', 0.0)),
+                float(w.get('stretch_gripper', {}).get('pos', 0.0)),
+                float(w.get('stretch_gripper', {}).get('pos', 0.0))
+            ]
+            self.js_pub.publish(msg)
+        except Exception:
+            pass
+
     def shutdown(self):
-        """Clean shutdown"""
-        self.get_logger().info('Shutting down robot...')
+        self.get_logger().info('Emergency Shutdown...')
         try:
             self.robot.stop()
-        except Exception as e:
-            self.get_logger().error(f'Error during robot shutdown: {e}')
+        except:
+            pass
 
 def main():
     rclpy.init()

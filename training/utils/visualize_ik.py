@@ -66,7 +66,18 @@ def replay_in_mujoco(result, speed=1.0):
         for i in range(0, len(retarget_positions), step):
             p = retarget_positions[i]
             sim.add_world_frame(position=(float(p[0]), float(p[1]), float(p[2])))
-        print(f"  Drew {len(range(0, len(retarget_positions), step))} trajectory markers")
+            print(f"  Drew {len(range(0, len(retarget_positions), step))} trajectory markers")
+
+    # --- Pre-align MuJoCo to Frame 0 ---
+    print("\nPre-aligning robot to the first trajectory frame...")
+    for j, name in enumerate(JOINT_NAMES):
+        if 'base' not in name:
+            mj_name = MUJOCO_JOINT_MAP[name]
+            sim.move_to(mj_name, float(joints[0, j]))
+            
+    # Give the simulated controllers 1 second to physically move the arm into place
+    time.sleep(1.0) 
+    # -----------------------------------
 
     # Identify indices for command mapping
     base_rot_idx = JOINT_NAMES.index('joint_mobile_base_rotation')
