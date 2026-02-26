@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+
 import zarr
 import numpy as np
 import argparse
@@ -14,10 +15,11 @@ class ZarrSynchronizer:
             "/tactile_gripper_controller": "obs/tactile_umi",
             "/camera_arm/color/image_rect_raw/compressed": "obs/video_wrist",
             "/gripper_width_normalized": "obs/gripper_position",
+            "/tactile_left": "obs/tactile_left",
+            "/tactile_right": "obs/tactile_right",
         }
 
-        # SIMPLIFIED CHAIN
-        # The detector already localizes umi_disconnect to base_link.
+        # Tf chain to get from base_link to gripper center via the detector frame
         self.tf_chain = [
             ("base_link", "umi_disconnect"),
             ("umi_disconnect", "umi_gripper")
@@ -70,7 +72,7 @@ class ZarrSynchronizer:
         zarr_path = os.path.join(vtam_root, "data", "processed", task_name, input_filename.replace(".mcap", ".zarr"))
         os.makedirs(os.path.dirname(zarr_path), exist_ok=True)
 
-        print(f"--- VTAM SIMPLIFIED PIPELINE ---\nInput: {input_abs}\nOutput: {zarr_path}")
+        print(f"--- VTAM PIPELINE ---\nInput: {input_abs}\nOutput: {zarr_path}")
 
         data_buffer = {k: [] for k in list(self.topic_map.values()) + ["obs/ee_pose"]}
         ts_buffer = {k: [] for k in list(self.topic_map.values()) + ["obs/ee_pose"]}
@@ -95,8 +97,21 @@ class ZarrSynchronizer:
 
             elif topic in self.topic_map:
                 key = self.topic_map[topic]
-                val = np.frombuffer(msg.ros_msg.data, dtype=np.uint8) if "compressed" in topic else np.array(msg.ros_msg.data, dtype=np.float32)
+                if "compressed" in topic:
+                    import cv2
+                    val = cv2.imdecode(np.frombuffer(msg.ros_msg.data, dtype=np.uint8), cv2.IMREAD_COLOR)
+                    val = cv2.cvtColor(val, cv2.COLOR_BGR2RGB)
+                    val = cv2.resize(val, (96, 96)).astype(np.uint8)
+                else:
+                    val = np.array(msg.ros_msg.data, dtype=np.float32)
+
                 data_buffer[key].append(val); ts_buffer[key].append(t)
+
+            elif topic in ("/tactile_left", "/tactile_right"):
+                key = self.topic_map[topic]
+                val = np.array(msg.ros_msg.data, dtype=np.float32)  # shape (15,)
+                data_buffer[key].append(val)
+                ts_buffer[key].append(t)
 
         if not pulse_ts:
             print("Error: No sync pulses found."); return
@@ -108,17 +123,55 @@ class ZarrSynchronizer:
         # Write Zarr
         root = zarr.group(store=zarr.DirectoryStore(zarr_path), overwrite=True)
         obs_group = root.create_group("obs")
+        
         for key in data_buffer.keys():
             name = key.replace("obs/", "")
+            
             if not data_buffer[key]:
-                synced = [None] * len(pulse_ts)
+                # Logic: If a topic is missing, create a zero-array of the expected shape
+                # Default shapes: tactile (15,), ee_pose (7,), gripper (1,), image (96,96,3)
+                shape_map = {
+                    "video_wrist": (96, 96, 3),
+                    "ee_pose": (7,),
+                    "gripper_position": (1,),
+                    "tactile_left": (15,),
+                    "tactile_right": (15,),
+                    "tactile_umi": (1,) # Adjust if your UMI shape is different
+                }
+                fallback_shape = shape_map.get(name, (1,))
+                synced = np.zeros((len(pulse_ts), *fallback_shape), dtype=np.float32)
+                if name == "video_wrist":
+                    synced = synced.astype(np.uint8)
             else:
+                # Proper synchronization using searchsorted
                 idx = np.clip(np.searchsorted(ts_buffer[key], pulse_ts), 0, len(data_buffer[key]) - 1)
-                synced = [data_buffer[key][i] for i in idx]
+                synced = np.stack([data_buffer[key][i] for i in idx])
+
+            # Final type enforcement before saving
+            if name == "video_wrist":
+                synced = synced.astype(np.uint8)
+            else:
+                synced = synced.astype(np.float32)
+
             try:
-                obs_group.create_dataset(name, data=np.array(synced), chunks=(100, *np.array(synced).shape[1:]), overwrite=True)
-            except:
-                obs_group.create_dataset(name, data=np.array(synced, dtype=object), chunks=(100,), overwrite=True, object_codec=numcodecs.Pickle())
+                # Use chunks=(1, ...) for better random access during training
+                obs_group.create_dataset(
+                    name, 
+                    data=synced, 
+                    chunks=(1, *synced.shape[1:]), 
+                    overwrite=True,
+                    compressor=zarr.Blosc(cname='zstd', clevel=3)
+                )
+            except Exception as e:
+                # Fallback only if absolutely necessary, but now it shouldn't be
+                print(f"Warning: Failed to save {name} as numerical array. Using object fallback. Error: {e}")
+                obs_group.create_dataset(
+                    name, 
+                    data=np.array(synced, dtype=object), 
+                    chunks=(1,), 
+                    overwrite=True, 
+                    object_codec=numcodecs.Pickle()
+                )
 
         print(f"Zarr Processing Complete: {os.path.basename(zarr_path)}")
 

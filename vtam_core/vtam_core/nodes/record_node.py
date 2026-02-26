@@ -142,29 +142,30 @@ class RecordDemoNode(Node):
                     self.recording_process.poll() is None)
 
         if not is_running:
-            # Clean up handle if it was left over
+            # Reset state
             self.recording_process = None
             
-            # Clear trajectory in detector to prevent stale data in next demo
+            # Clear detector trajectory (optional but good practice)
             self.get_logger().info("Sending Clear Signal to Detector...")
             try:
-                # This calls the service we just created in the other node
                 subprocess.run(["ros2", "service", "call", "/umi_detector/clear_path", "std_srvs/srv/Empty", "{}"], 
                                timeout=1.0, capture_output=True)
             except Exception as e:
                 self.get_logger().warn(f"Could not clear detector path: {e}")
-            # Prepare paths
+
+            # Prepare paths and names
             name_prefix = self.get_parameter('demo_name').get_parameter_value().string_value
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             task_dir = os.path.join(self.save_dir, name_prefix)
             os.makedirs(task_dir, exist_ok=True)
             self.current_bag_path = os.path.join(task_dir, f"{name_prefix}_{timestamp}")
 
+            # Define recording command
             topics = [
                 "/sync_pulse", "/tf", "/tf_static", "/umi_trajectory",
-                # "/camera/color/image_raw/compressed", "/camera/color/camera_info",
                 "/camera_arm/color/image_rect_raw/compressed", "/camera_arm/color/camera_info",
-                 "/tactile_gripper_controller", "/joint_states", "/gripper_width_normalized",
+                "/tactile_gripper_controller", "/joint_states", "/gripper_width_normalized",
+                "/tactile_left", "/tactile_right"
             ]
 
             cmd = [
@@ -173,12 +174,16 @@ class RecordDemoNode(Node):
             ] + topics
             
             try:
+                # Start subprocess 
                 self.recording_process = subprocess.Popen(cmd, start_new_session=True)
                 
-                #  Warm-up delay for buffer initialization
-                self.get_logger().info("Initializing MCAP buffers (2s warm-up)...")
+
+                # Wait 3 seconds here to let the camera I-frames and TF tree populate.
+                self.get_logger().info("Initializing MCAP buffers (3s silent warm-up)...")
+                time.sleep(3.0)
+
+                # Play audio feedback after successful start
                 self.play_audio_feedback("start")
-                time.sleep(2.0)
                 
                 response.success = True
                 response.message = f"RECORDING LIVE: {self.current_bag_path}"
@@ -186,6 +191,7 @@ class RecordDemoNode(Node):
                 response.success = False
                 response.message = f"Failed to start: {str(e)}"
         else:
+            # Toggle logic: If already running, stop it.
             self.stop_recording()
             response.success = True
             response.message = "RECORDING STOPPED."
