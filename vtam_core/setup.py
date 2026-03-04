@@ -13,10 +13,9 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        (os.path.join('share', package_name, 'launch'), glob('launch/*.xml')),
-        (os.path.join('share', package_name, 'launch'), glob('launch/*.py')),
-        (os.path.join('share', package_name, 'rviz'), glob('rviz/*.rviz')),
-        (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
+        ('share/' + package_name + '/launch', glob('launch/*.xml') + glob('launch/*.py')),
+        ('share/' + package_name + '/rviz', glob('rviz/*.rviz')),
+        ('share/' + package_name + '/config', glob('config/*.yaml')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -32,9 +31,11 @@ setup(
             'eflesh_node = vtam_core.drivers.eflesh_node:main',
             'umi_detector_node = vtam_core.drivers.umi_detector_node:main',
             'umi_gripper_node = vtam_core.nodes.umi_gripper_node:main',
-            
+            'cv_tracker = vtam_core.cv_tracker:main',
+            'imu_calibration_helper = vtam_core.nodes.imu_helper:main',
+
             # Debug nodes
-            'viz_node = vtam_core.debug.viz_node:main',
+            'tactile_viz_node = vtam_core.debug.viz_node:main',
             'eflesh_debug_node = vtam_core.debug.eflesh_debug_node:main',
         ],
     },

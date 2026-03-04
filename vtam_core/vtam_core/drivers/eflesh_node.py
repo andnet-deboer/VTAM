@@ -154,7 +154,7 @@ class EFleshNode(Node):
             self.sync_callback,
             10
         )
-        self.get_logger().info('✓ EFlesh Node Latched to Master 10Hz Clock')
+        self.get_logger().info('✓ EFlesh Node Latched to Master Clock')
 
     def _calibrate(self, reader, samples=50):   
         """Updated to accept the specific reader instance"""

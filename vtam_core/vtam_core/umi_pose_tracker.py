@@ -1,129 +1,220 @@
 #!/usr/bin/env python3
-import math
+"""
+head_pose_tracker.py — Visual servoing head tracker for the UMI cube.
+
+Subscribes to /umi_cube/pixel_centroid (PointStamped) published by
+umi_detector_node and drives head_pan / head_tilt to keep the cube
+centred in the D435i image using a simple P controller.
+
+Camera is mounted VERTICALLY so image axes are swapped vs world:
+    image X (columns) → real-world vertical   → drives TILT
+    image Y (rows)    → real-world horizontal  → drives PAN
+
+Control law:
+    err_x   = centroid_px - image_w / 2
+    err_y   = centroid_py - image_h / 2
+    pan_cmd  = current_pan  - err_y * k_pan  * sign_pan
+    tilt_cmd = current_tilt + err_x * k_tilt * sign_tilt
+
+Dynamic reconfigure (ros2 param set):
+    k_pan        float   Gain for pan  axis (rad/px). Default 0.001
+    k_tilt       float   Gain for tilt axis (rad/px). Default 0.001
+    sign_pan     float   +1.0 or -1.0 — flip pan  direction
+    sign_tilt    float   +1.0 or -1.0 — flip tilt direction
+    pan_deadzone float   Min pan  change before issuing command (rad)
+    tilt_deadzone float  Min tilt change before issuing command (rad)
+    image_w      int     Image width  (pixels) — matches D435i resolution
+    image_h      int     Image height (pixels) — matches D435i resolution
+
+Example:
+    ros2 param set /your_node_name sign_pan -1.0
+    ros2 param set /your_node_name k_pan 0.002
+"""
+from std_msgs.msg import Bool
 import time
 import numpy as np
-from rclpy.time import Time
-from rclpy.duration import Duration
 
-class AlphaBetaFilter:
-    """Estimates position and velocity with noise-gate deadband logic."""
-    def __init__(self, alpha=0.8, beta=0.2, deadband=0.005):
-        self.alpha = alpha
-        self.beta = beta
-        self.deadband = deadband 
-        self.pos = np.zeros(3)
-        self.vel = np.zeros(3)
-        self.initialized = False
+from rcl_interfaces.msg import (
+    ParameterDescriptor, ParameterType, SetParametersResult
+)
+from geometry_msgs.msg import PointStamped
 
-    def update(self, measurement, dt):
-        m = np.array(measurement)
-        if not self.initialized:
-            self.pos = m
-            self.initialized = True
-            return self.pos
-
-        dt = max(dt, 0.001)
-        dist_moved = np.linalg.norm(m - self.pos)
-        
-        if dist_moved < self.deadband:
-            self.vel *= 0.1 
-            return self.pos
-
-        prediction = self.pos + (self.vel * dt)
-        residual = m - prediction
-        self.pos = prediction + (self.alpha * residual)
-        self.vel = self.vel + (self.beta / dt) * residual
-        return self.pos
 
 class HeadPoseTracker:
-    def __init__(self, node, robot):
-        self.node = node
-        self.robot = robot
-        
-        # Motion Profiles
-        self.pan_profile = {'v': 8.0, 'a': 35.0}  
-        self.tilt_profile = {'v': 4.0, 'a': 15.0} 
-        
-        # Asymmetric Filtering
-        self.pan_filter = AlphaBetaFilter(alpha=0.85, beta=0.3, deadband=0.004)
-        self.tilt_filter = AlphaBetaFilter(alpha=0.15, beta=0.05, deadband=0.008)
+    """
+    Instantiate inside your ROS2 node:
 
-        # Limits & State
-        self.pan_range = (-3.8, 1.5)
-        self.look_ahead = 0.06
-        self.last_time = time.time()
-        
-        # Start scanning immediately by setting last_seen to the past
-        self.last_seen = 0.0 
-        self.scanning = False
-        self.scan_direction = 1.0 # 1.0 for CCW, -1.0 for CW
+        self.head_tracker = HeadPoseTracker(self, robot)
+
+    Then call in your control loop timer:
+
+        self.head_tracker.tick()
+    """
+
+    def __init__(self, node, robot):
+        self.node  = node
+        self.robot = robot
+
+        # ── Declare ROS parameters ────────────────────────────────────────────
+        node.declare_parameter('k_pan',         0.001,
+            ParameterDescriptor(description='Pan gain (rad/px). Increase if sluggish, decrease if oscillating.'))
+        node.declare_parameter('k_tilt',        0.001,
+            ParameterDescriptor(description='Tilt gain (rad/px).'))
+        node.declare_parameter('sign_pan',       -1.0,
+            ParameterDescriptor(description='Flip pan direction: +1.0 or -1.0'))
+        node.declare_parameter('sign_tilt',      -1.0,
+            ParameterDescriptor(description='Flip tilt direction: +1.0 or -1.0'))
+        node.declare_parameter('pan_deadzone',   0.04,
+            ParameterDescriptor(description='Min pan  delta before issuing move_to (rad)'))
+        node.declare_parameter('tilt_deadzone',  0.05,
+            ParameterDescriptor(description='Min tilt delta before issuing move_to (rad)'))
+        node.declare_parameter('image_w',        640,
+            ParameterDescriptor(description='D435i image width  (pixels)'))
+        node.declare_parameter('image_h',        480,
+            ParameterDescriptor(description='D435i image height (pixels)'))
+
+        self._load_params()
+        node.add_on_set_parameters_callback(self._param_cb)
+
+        self.recording = False
+
+        # ── Motion profiles ───────────────────────────────────────────────────
+        self.pan_profile  = {'v': 4.0,  'a': 5.0}
+        self.tilt_profile = {'v': 2.0,  'a': 3.0}
+
+        # ── Joint limits ──────────────────────────────────────────────────────
+        self.pan_range  = (-3.8, 1.5)
+        self.tilt_range = (-1.5, 0.4)
+
+        # ── Scan state ────────────────────────────────────────────────────────
+        self.last_seen      = 0.0
+        self.scanning       = False
+        self.scan_direction = 1.0   # +1 CCW, -1 CW
+
+        # ── Latest pixel centroid ─────────────────────────────────────────────
+        self._latest_pixel: PointStamped | None = None
+
+        node.create_subscription(
+            PointStamped,
+            '/umi_cube/pixel_centroid',
+            self._pixel_cb,
+            10
+        )
+
+        node.create_subscription(Bool, '/recording/active', 
+    lambda m: setattr(self, 'recording', m.data), 10)
+
+        node.get_logger().info(
+            "HeadPoseTracker ready.\n"
+            f"  k_pan={self.k_pan}  sign_pan={self.sign_pan}\n"
+            f"  k_tilt={self.k_tilt}  sign_tilt={self.sign_tilt}\n"
+            f"  image: {self.image_w}x{self.image_h}\n"
+            "Tune signs with:\n"
+            "  ros2 param set /<node> sign_pan  -1.0\n"
+            "  ros2 param set /<node> sign_tilt -1.0"
+        )
+
+    # ── Parameter helpers ─────────────────────────────────────────────────────
+
+    def _load_params(self):
+        g = self.node.get_parameter
+        self.k_pan         = g('k_pan').value
+        self.k_tilt        = g('k_tilt').value
+        self.sign_pan      = g('sign_pan').value
+        self.sign_tilt     = g('sign_tilt').value
+        self.pan_deadzone  = g('pan_deadzone').value
+        self.tilt_deadzone = g('tilt_deadzone').value
+        self.image_w       = g('image_w').value
+        self.image_h       = g('image_h').value
+
+    def _param_cb(self, params):
+        for p in params:
+            if p.name == 'k_pan':          self.k_pan         = p.value
+            if p.name == 'k_tilt':         self.k_tilt        = p.value
+            if p.name == 'sign_pan':       self.sign_pan      = p.value
+            if p.name == 'sign_tilt':      self.sign_tilt     = p.value
+            if p.name == 'pan_deadzone':   self.pan_deadzone  = p.value
+            if p.name == 'tilt_deadzone':  self.tilt_deadzone = p.value
+            if p.name == 'image_w':        self.image_w       = p.value
+            if p.name == 'image_h':        self.image_h       = p.value
+        self.node.get_logger().info(
+            f"Params updated — k_pan={self.k_pan} sign_pan={self.sign_pan} "
+            f"k_tilt={self.k_tilt} sign_tilt={self.sign_tilt}"
+        )
+        return SetParametersResult(successful=True)
+
+    # ── Pixel centroid callback ───────────────────────────────────────────────
+
+    def _pixel_cb(self, msg: PointStamped):
+        self._latest_pixel = msg
+        self.last_seen = time.time()
+
+    # ── Main tick ─────────────────────────────────────────────────────────────
 
     def tick(self):
-        target = self._lookup_target()
+        if self.recording:
+            return
         now = time.time()
-        dt = now - self.last_time
-        self.last_time = now
 
-        if target:
-            self.last_seen = now
-            self.pan_filter.update(target, dt)
-            self.tilt_filter.update(target, dt)
-            
-            p_future = self.pan_filter.pos + (self.pan_filter.vel * self.look_ahead)
-            t_future = self.tilt_filter.pos + (self.tilt_filter.vel * self.look_ahead)
-            
-            self._execute_move(p_future, t_future)
-        elif now - self.last_seen > 2.0:
+        if self._latest_pixel is None or (now - self.last_seen) > 2.0:
             self._scan()
+            return
 
-    def _execute_move(self, p_target, t_target):
+        # Stop scan if we were scanning
         if self.scanning:
-            self.node.get_logger().info("Target Locked: Ceasing Scan")
+            self.node.get_logger().info("Target locked — stopping scan.")
             self.robot.head.get_joint('head_pan').set_velocity(0.0)
             self.scanning = False
 
-        desired_pan = math.atan2(-p_target[0], p_target[1])
-        horiz_dist = math.sqrt(t_target[0]**2 + t_target[1]**2)
-        desired_tilt = math.atan2(t_target[2], horiz_dist)
-
-        self.robot.head.move_to('head_pan', np.clip(desired_pan, *self.pan_range), 
-                                v_r=self.pan_profile['v'], a_r=self.pan_profile['a'])
-        self.robot.head.move_to('head_tilt', np.clip(desired_tilt, -1.5, 0.4), 
-                                v_r=self.tilt_profile['v'], a_r=self.tilt_profile['a'])
-
-    def _lookup_target(self):
+        # Always read TRUE current joint positions — avoids snap-to-home bug
         try:
-            t = self.node.tf_buffer.lookup_transform(
-                'link_head', 'umi_gripper', Time(seconds=0), timeout=Duration(seconds=0.01)
-            )
-            tr = t.transform.translation
-            return (tr.x, tr.y, tr.z)
-        except Exception:
-            return None
+            current_pan  = self.robot.head.status['head_pan']['pos']
+            current_tilt = self.robot.head.status['head_tilt']['pos']
+        except Exception as e:
+            self.node.get_logger().warn(f"Could not read head joint state: {e}")
+            return
+
+        # Pixel error from image centre
+        err_x = self._latest_pixel.point.x - self.image_w / 2.0
+        err_y = self._latest_pixel.point.y - self.image_h / 2.0
+
+        # Camera mounted VERTICALLY:
+        #   image X (cols) → world vertical   → tilt
+        #   image Y (rows) → world horizontal → pan
+        pan_cmd  = current_pan  - err_y * self.k_pan  * self.sign_pan
+        tilt_cmd = current_tilt + err_x * self.k_tilt * self.sign_tilt
+
+        pan_cmd  = float(np.clip(pan_cmd,  *self.pan_range))
+        tilt_cmd = float(np.clip(tilt_cmd, *self.tilt_range))
+
+        # Deadzone gate — suppress hunting on sub-pixel noise
+        if abs(pan_cmd - current_pan) > self.pan_deadzone:
+            self.robot.head.move_to('head_pan',  pan_cmd,
+                                    v_r=self.pan_profile['v'],
+                                    a_r=self.pan_profile['a'])
+
+        if abs(tilt_cmd - current_tilt) > self.tilt_deadzone:
+            self.robot.head.move_to('head_tilt', tilt_cmd,
+                                    v_r=self.tilt_profile['v'],
+                                    a_r=self.tilt_profile['a'])
+
+    # ── Scan ──────────────────────────────────────────────────────────────────
 
     def _scan(self):
-        """Sweeps the head back and forth across the pan range."""
         if not self.scanning:
-            self.node.get_logger().info("Starting Scan")
+            self.node.get_logger().info("No target — starting scan.")
             self.scanning = True
-        
+
         try:
-            # Get current position to check for boundary hit
             curr_pan = self.robot.head.status['head_pan']['pos']
-            
-            # Switch direction if near limits
-            # Margin of 0.1 radians to prevent getting stuck at the edge
+
             if curr_pan >= self.pan_range[1] - 0.1:
                 self.scan_direction = -1.0
             elif curr_pan <= self.pan_range[0] + 0.1:
                 self.scan_direction = 1.0
-            
-            # Set sweep velocity
-            sweep_vel = 0.6 * self.scan_direction
-            
-            self.robot.head.get_joint('head_pan').set_velocity(sweep_vel)
-            # Keep head slightly tilted down to find objects on tables
+
+            self.robot.head.get_joint('head_pan').set_velocity(0.6 * self.scan_direction)
             self.robot.head.move_to('head_tilt', -0.5)
-            
+
         except Exception as e:
-            self.node.get_logger().error(f"Scan failed: {e}")
+            self.node.get_logger().error(f"Scan error: {e}")

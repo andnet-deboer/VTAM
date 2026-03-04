@@ -32,7 +32,6 @@ import signal
 import subprocess
 import time
 from datetime import datetime
-from nav_msgs.msg import Path
 
 import rclpy
 from rclpy.node import Node
@@ -40,6 +39,20 @@ from rclpy.qos import DurabilityPolicy, QoSProfile
 from std_msgs.msg import Bool
 from std_srvs.srv import SetBool
 
+# Topics to record in every session bag
+SESSION_TOPICS = [
+    "/sync_clock",
+    "/tf",
+    "/tf_static",
+    "/recording/active",
+    "/camera_arm/color/image_rect_raw/compressed",
+    "/camera_arm/color/camera_info",
+    "/gripper_width_normalized",
+    "/joint_states",
+    "/tactile_gripper_controller",
+    "/tactile_left",
+    "/tactile_right",
+]
 
 # Seconds to wait after bag launch before allowing episode recording.
 # Ensures camera frames and TF tree are fully populated.
@@ -64,7 +77,6 @@ class RecordDemoNode(Node):
     def __init__(self):
         super().__init__('record_demo_node')
         self.declare_parameter('demo_name', 'demo')
-        self.declare_parameter('session_topics', rclpy.Parameter.Type.STRING_ARRAY)
 
         # Session state
         self._bag_process = None
@@ -85,14 +97,6 @@ class RecordDemoNode(Node):
         # Services
         self._start_srv = self.create_service(SetBool, 'start_session', self._start_session_callback)
         self._record_srv = self.create_service(SetBool, 'record_demo', self._toggle_callback)
-
-        self.target_path = None
-        self.sub_trajectory = self.create_subscription(
-            Path, 
-            '/umi_trajectory', 
-            self._trajectory_callback, 
-            latching_qos
-        )
 
         # Storage watchdog
         self.create_timer(1.0, self._storage_watchdog)
@@ -138,17 +142,10 @@ class RecordDemoNode(Node):
 
         self._session_bag_path = os.path.join(task_dir, f"session_{timestamp}")
 
-        # Fetch topics from the configs
-        topics = self.get_parameter('session_topics').get_parameter_value().string_array_value
-        
-        if not topics:
-            self.get_logger().error("No session topics found in config!")
-            return
-
         cmd = [
             "ros2", "bag", "record", "-s", "mcap",
             "-o", self._session_bag_path,
-        ] + list(topics) 
+        ] + SESSION_TOPICS
 
         self.get_logger().info(f"Starting session bag: {self._session_bag_path}")
         self.get_logger().info(f"Warming up MCAP buffers ({WARMUP_SECONDS}s)...")
@@ -191,12 +188,6 @@ class RecordDemoNode(Node):
             self._bag_process = None
             self.get_logger().info(f"Session saved: {self._session_bag_path}")
             self.get_logger().info("Run chunk_bag.py to extract individual episodes.")
-
-    def _trajectory_callback(self, msg):
-        """Processes the interpolated path from the UMI detector."""
-        if len(msg.poses) > 0:
-            # Captures the most recent smoothed pose for the robot to follow
-            self.target_path = msg.poses[-1]
 
     # ── Episode control ───────────────────────────────────────────────────────
 

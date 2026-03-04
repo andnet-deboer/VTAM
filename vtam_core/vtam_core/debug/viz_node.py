@@ -26,14 +26,21 @@ class TactileVizNode(Node):
         self.sub_right = self.create_subscription(
             Float32MultiArray, '/tactile_right', self.right_callback, 10)
 
+        # UMI Gripper
+        self.sub_umi = self.create_subscription(
+            Float32MultiArray, '/tactile_gripper_controller', self.umi_callback, 10)
+
         # --- Publishers (Output Images) ---
         # Left
         self.pub_left_img = self.create_publisher(Image, '/viz/tactile_left', 10)
         # Right (New)
         self.pub_right_img = self.create_publisher(Image, '/viz/tactile_right', 10)
         
+        # UMI Gripper (New)
+        self.pub_umi_img = self.create_publisher(Image, '/viz/tactile_umi', 10)
         # Chip locations (approximate pixel coordinates for 300x300 image)
         # [x, y]
+
         self.locations = np.array([
             [150, 150], # Center
             [90, 150],  # Left
@@ -91,6 +98,14 @@ class TactileVizNode(Node):
         ros_msg = self.bridge.cv2_to_imgmsg(cv_image, encoding="bgr8")
         # 3. Publish
         self.pub_right_img.publish(ros_msg)
+
+    def umi_callback(self, msg):
+        # 1. Generate Image
+        cv_image = self.draw_heatmap(msg.data)
+        # 2. Convert to ROS Msg
+        ros_msg = self.bridge.cv2_to_imgmsg(cv_image, encoding="bgr8")
+        # 3. Publish
+        self.pub_umi_img.publish(ros_msg)
 
 def main(args=None):
     rclpy.init(args=args)

@@ -58,8 +58,9 @@ class VtamControlLoop(Node):
                 with self.lock:
                     # Tracker is essential for EE poses, so we run it constantly
                     self.head_tracker.tick()
+                    #pass
                 # Tiny sleep to prevent 100% CPU burn-up
-                time.sleep(0.001)
+                time.sleep(0.033)
             except Exception as e:
                 self.get_logger().error(f"Tracker thread error: {e}")
 
@@ -74,6 +75,7 @@ class VtamControlLoop(Node):
                 self.gripper_controller.tick()
                 self.robot.push_command()
                 self.publish_js()
+            self._publish_head_js()
 
             # 2. Data Sync Pulse (~30Hz)
             # We pulse 3 times every 5 ticks (3/5 * 50 = 30Hz)
@@ -134,6 +136,19 @@ class VtamControlLoop(Node):
         try:
             self.robot.stop()
         except:
+            pass
+    
+    def _publish_head_js(self):
+        msg = JointState()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.name = ['joint_head_pan', 'joint_head_tilt']
+        try:
+            msg.position = [
+                float(self.robot.head.status['head_pan']['pos']),
+                float(self.robot.head.status['head_tilt']['pos'])
+            ]
+            self.js_pub.publish(msg)  # reuse existing publisher
+        except Exception:
             pass
 
 def main():

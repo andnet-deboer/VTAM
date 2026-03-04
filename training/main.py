@@ -5,8 +5,8 @@ from pathlib import Path
 import numpy as np
 
 # Import modules
-from training.utils.kinematics import StretchRetargeter
-import training.scripts.process_demo as process_demo  
+from VTAM.training.utils.kinematics import StretchRetargeter
+import VTAM.training.old.process_demo_old as process_demo_old  
 # import bag_to_zarr # Placeholder for the final export step
 
 def run_pipeline(task_name, episode_id, raw_path, output_root):
@@ -18,7 +18,7 @@ def run_pipeline(task_name, episode_id, raw_path, output_root):
 
     # Extract raw data from MCAP and sync Tactile + Pose + Gripper to 10Hz
     try:
-        synced_data = process_demo.sync_mcap_to_dict(raw_path, target_hz=10.0)
+        synced_data = process_demo_old.sync_mcap_to_dict(raw_path, target_hz=10.0)
     except Exception as e:
         print(f"  [!] Sync Failed: {e}")
         return False

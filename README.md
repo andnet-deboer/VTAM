@@ -19,7 +19,18 @@ VTAM is a **Visuo-Tactile Assistive Manipulation Platform** designed for the Hel
 * **Open-Ended Architecture:** A skill-agnostic policy manager capable of switching tasks on the fly.
 
 ---
+for lerobot
+git clone https://github.com/hello-robot/lerobot
+cd lerobot
+git switch stretch-act
+uv pip install av --no-build-isolation
+uv pip install -e . --no-deps
+uv pip install datasets safetensors huggingface-hub torch torchvision
 
+for stretch ai
+python3 -m pip install --user sophuspy
+python -m pip install -e ./src --no-cache-dir
+python -m pip uninstall av -y
 ##  Repository Structure
 
 ```text
@@ -42,6 +53,24 @@ VTAM/
 # Build stretch_description Symlink 
 cd ros_ws/src
 ln -s ../../dependencies/stretch_ros2/stretch_description .
+
+### Install UV
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+### Refresh path
+source ~/.bashrc or source ~/.zshrc
+
+cd ~/VTAM
+
+uv sync
+
+source .venv/bin/activate
+
+uv pip install -e dependencies/diffusion_policy --config-setting editable_mode=compat
+
+rsync -av --progress leogray@10.106.29.84:~/VTAM/data/training/pickup_cup.zarr ~/VTAM/data/training/
+
+
 
 #### Check the Link
 ls -la stretch_description 

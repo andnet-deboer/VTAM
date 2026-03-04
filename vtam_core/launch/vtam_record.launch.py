@@ -28,10 +28,16 @@ def generate_launch_description():
         launch_arguments={
             'serial_no': '_128422270608',
             'camera_name': 'camera_arm',
-            # MINIMUM RESOLUTION for Wrist
-            'rgb_camera.color_profile': '424x240x30', 
+            'rgb_camera.color_profile': '640x480x30',
+            'depth_module.profile': '640x480x30',
             'rgb_camera.enable_auto_exposure': 'true',
-            'rgb_camera.auto_exposure_priority': 'false',
+            'rgb_camera.auto_exposure_priority': 'false',  # prioritize framerate over exposure
+            'rgb_camera.brightness': '50',        # 0-100, default ~50
+            'rgb_camera.contrast': '50',          # 0-100  
+            'rgb_camera.gamma': '300',            
+            'rgb_camera.sharpness': '50',
+            'rgb_camera.saturation': '64',
+            'align_depth.enable': 'true',
         }.items(),
     )
 
@@ -50,8 +56,10 @@ def generate_launch_description():
                     'enable_depth': 'false',
                     'camera_namespace': '',
                     'base_frame_id': 'camera_bottom_screw_frame',
-                    'unite_imu_method': '0',
                     'rgb_camera.color_profile': '640x480x60', 
+                    'unite_imu_method': '2',
+                    'enable_accel': 'true',
+                    'enable_gyro': 'true',
                 }.items()
             )
         ]
@@ -110,11 +118,22 @@ def generate_launch_description():
         )
     )
 
+    # Tactile visualization node
+    tactile_viz_node = TimerAction(
+        period=6.0, # Wait for sensors to calibrate
+        actions=[Node(
+            package='vtam_core',
+            executable='tactile_viz_node', # Ensure this matches your setup.py entry point
+            output='screen',
+        )]
+    )
     # Record node
+    topics_config = os.path.join(pkg_share, 'config', 'record.yaml')
+
     record_node = Node(
         package='vtam_core',
         executable='record_node',
-        output='screen'
+        parameters=[topics_config, {'demo_name': 'default_demo'}],
     )
     
     return LaunchDescription([
@@ -125,5 +144,6 @@ def generate_launch_description():
         eflesh_node,
         terminate_on_eflesh_exit,
         vtam_robot_node,
+        tactile_viz_node,
         record_node   
     ])

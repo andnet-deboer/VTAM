@@ -38,7 +38,7 @@ import os
 # --- Import analytical solver for seeding ---
 UTILS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, UTILS_DIR)
-from kinematics import StretchIK
+from VTAM.training.utils.kinematics import StretchIK
 
 
 class TrajectoryRetargeter:

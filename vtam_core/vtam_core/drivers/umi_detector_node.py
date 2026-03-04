@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-UMI Cube Tracker - BASE_LINK ALIGNED VERSION
+UMI Cube Tracker
 """
 
 import cv2
@@ -21,6 +21,10 @@ from ament_index_python.packages import get_package_share_directory
 from rclpy.time import Time
 from nav_msgs.msg import Path
 from std_srvs.srv import Empty
+from geometry_msgs.msg import PoseStamped
+from rclpy.qos import QoSProfile, DurabilityPolicy
+from geometry_msgs.msg import PointStamped 
+from vtam_core.nodes.imu_corrector import ImuCorrector
 
 class OneEuroFilter:
     def __init__(self, freq, min_cutoff=1.0, beta=0.0, d_cutoff=1.0):
@@ -105,15 +109,22 @@ class UmiDetectorNode(Node):
         
         self.pose_pub = self.create_publisher(PoseStamped, 'umi_cube_pose', 10)
         self.gripper_pub = self.create_publisher(PoseStamped, 'umi_gripper_pose', 10)
-
+        self.pixel_pub = self.create_publisher(PointStamped, '/umi_cube/pixel_centroid', 10)
+        
         # Track startup time to suppress warnings during TF buffer warmup
         self.startup_time = self.get_clock().now()
         self.tf_ready = False
 
         # Path Publisher
-        self.path_pub = self.create_publisher(Path, '/umi_trajectory', 10)
+        # Define the profile
+        latching_qos = QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL
+        )
+        self.path_pub = self.create_publisher(Path, '/umi_trajectory', latching_qos)
         self.path_msg = Path()
         self.path_msg.header.frame_id = 'base_link'
+        self.path_pub.publish(self.path_msg)
 
         # Clear path service
         self.create_service(Empty, 'umi_detector/clear_path', self.clear_path_cb)
@@ -126,10 +137,10 @@ class UmiDetectorNode(Node):
             self.marker_info = yaml.safe_load(f) 
 
         # Parameters
-        self.declare_parameter('pos_min_cutoff', 0.9)
-        self.declare_parameter('pos_beta', 0.06)
-        self.declare_parameter('quat_min_cutoff', 0.1)
-        self.declare_parameter('quat_beta', 0.06)
+        self.declare_parameter('pos_min_cutoff', 1.7)
+        self.declare_parameter('pos_beta', 0.1)
+        self.declare_parameter('quat_min_cutoff', 0.5)
+        self.declare_parameter('quat_beta', 0.1)
         self.declare_parameter('off_r', 180.0)
         self.declare_parameter('off_p', 0.0)
         self.declare_parameter('off_y', 0.0)
@@ -144,6 +155,7 @@ class UmiDetectorNode(Node):
         self.dictionary = aruco.getPredefinedDictionary(aruco.DICT_APRILTAG_36h11)
         self.detector = aruco.ArucoDetector(self.dictionary, aruco.DetectorParameters())
         self.collection, self.camera_info_dict, self.prev_cube_pose = {}, None, None
+        self.imu = ImuCorrector(self, imu_topic='/camera/camera/imu')
         
         self.create_subscription(CameraInfo, 'camera/color/camera_info', self.info_cb, 10)
         self.create_subscription(Image, 'camera/color/image_raw', self.image_cb, 10)
@@ -214,6 +226,20 @@ class UmiDetectorNode(Node):
         # Exit if no cube-related tags are valid
         if not cube_candidates:
             return
+        
+        if cube_candidates:
+            total_w = sum(c['weight'] for c in cube_candidates)
+            # weighted average of corner centroids in pixel space
+            px = sum(np.mean(corners[i][0][:, 0]) * cube_candidates[i]['weight'] 
+                    for i in range(len(cube_candidates))) / total_w
+            py = sum(np.mean(corners[i][0][:, 1]) * cube_candidates[i]['weight'] 
+                    for i in range(len(cube_candidates))) / total_w
+
+            pixel_msg = PointStamped()
+            pixel_msg.header.stamp = self.get_clock().now().to_msg()
+            pixel_msg.point.x = float(px)
+            pixel_msg.point.y = float(py)
+            self.pixel_pub.publish(pixel_msg)
 
         # Weighted averaging of raw detections in camera space
         weights = np.array([c['weight'] for c in cube_candidates])
@@ -227,7 +253,7 @@ class UmiDetectorNode(Node):
             t = self.tf_buffer.lookup_transform(
                 'base_link', 
                 'camera_color_optical_frame', 
-                Time(seconds=0), 
+                Time(seconds=0),
                 timeout=Duration(seconds=0.05)
             )
             
@@ -241,22 +267,15 @@ class UmiDetectorNode(Node):
                 t.transform.translation.y, 
                 t.transform.translation.z
             ])
-
-            # Decouple camera pitch to stop tilt jitter
-            cam_rpy = R_base_cam.as_euler('xyz', degrees=True)
-            current_pitch = cam_rpy[1]
-            
-            if not hasattr(self, 'smoothed_pitch'):
-                self.smoothed_pitch = current_pitch
-            else:
-                self.smoothed_pitch = (0.9 * self.smoothed_pitch) + (0.1 * current_pitch)
+            # IMU CORRECTION
+            # R_base_cam = self.imu.correct_rotation(R_base_cam)
 
             # Global Position
             fused_pos = T_base_cam + R_base_cam.apply(f_pos_cam)
             
             # Global Orientation with smoothed pitch correction
             R_cube_world = R_base_cam * R_scipy.from_quat(f_quat_cam)
-            R_fix = R_scipy.from_euler('zyx', [0, -self.smoothed_pitch, 180], degrees=True)
+            R_fix = R_scipy.from_euler('zyx', [0, 0, 180], degrees=True)
             fused_quat = (R_cube_world * R_fix).as_quat()
 
             # Filtering
@@ -286,6 +305,25 @@ class UmiDetectorNode(Node):
             p_msg.pose.position.x, p_msg.pose.position.y, p_msg.pose.position.z = map(float, fused_pos)
             p_msg.pose.orientation.x, p_msg.pose.orientation.y, p_msg.pose.orientation.z, p_msg.pose.orientation.w = map(float, fused_quat_corrected)
             self.pose_pub.publish(p_msg)
+
+            # Create a new pose for this specific point in time
+            new_pose = PoseStamped()
+            new_pose.header.stamp = now
+            new_pose.header.frame_id = 'base_link'
+            new_pose.pose.position.x = float(fused_pos[0])
+            new_pose.pose.position.y = float(fused_pos[1])
+            new_pose.pose.position.z = float(fused_pos[2])
+            new_pose.pose.orientation.x = float(fused_quat_corrected[0])
+            new_pose.pose.orientation.y = float(fused_quat_corrected[1])
+            new_pose.pose.orientation.z = float(fused_quat_corrected[2])
+            new_pose.pose.orientation.w = float(fused_quat_corrected[3])
+
+            # Append to the path history
+            self.path_msg.poses.append(new_pose)
+            
+            # Update header and PUBLISH
+            self.path_msg.header.stamp = now
+            self.path_pub.publish(self.path_msg)
 
         except Exception as e:
             # This ensures that if TF fails the loop doesn't crash,
