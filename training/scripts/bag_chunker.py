@@ -83,119 +83,108 @@ def encode_float32(value: float) -> bytes:
 
 # ── Core ───────────────────────────────────────────────────────────────────────
 
-def chunk_bag(bag_path: str, output_dir: str):
+def chunk_bag(bag_path: str, output_dir: str, episode_offset: int = 0) -> int:
     mcap_path = resolve_mcap(bag_path)
     print(f"Source: {mcap_path}")
 
     episodes = index_episodes(mcap_path)
     if not episodes:
         print("No complete episodes found.")
-        return
+        return episode_offset
     print(f"Found {len(episodes)} episode(s).")
-
-    # Read all messages once
-    raw_messages = []   # (publish_time_ns, topic, raw_bytes)
-    channel_meta = {}   # topic → (schema, channel)
-
-    with open(mcap_path, "rb") as f:
-        reader = make_reader(f)
-        for schema, channel, message in tqdm(
-            reader.iter_messages(topics=EPISODE_TOPICS), desc="Reading"
-        ):
-            raw_messages.append((message.publish_time, channel.topic, message.data))
-            if channel.topic not in channel_meta:
-                channel_meta[channel.topic] = (schema, channel)
 
     os.makedirs(output_dir, exist_ok=True)
 
-    valid_count = 0
-    for ep_idx, (start_ns, end_ns) in enumerate(episodes):
-        out_path = os.path.join(output_dir, f"episode_{ep_idx:03d}.mcap")
+    # Pass 1: collect channel metadata + sync timestamps per episode (lightweight)
+    channel_meta = {}
+    sync_per_episode = [[] for _ in episodes]
 
-        # Slice messages to episode window
-        episode_msgs = [
-            (ts, topic, data)
-            for ts, topic, data in raw_messages
-            if start_ns <= ts <= end_ns
-        ]
+    with open(mcap_path, "rb") as f:
+        reader = make_reader(f)
+        for schema, channel, message in tqdm(reader.iter_messages(topics=EPISODE_TOPICS), desc="Indexing"):
+            ts = message.publish_time
+            if channel.topic not in channel_meta:
+                channel_meta[channel.topic] = (schema, channel)
+            if channel.topic == SYNC_TOPIC:
+                for i, (start_ns, end_ns) in enumerate(episodes):
+                    if start_ns <= ts <= end_ns:
+                        sync_per_episode[i].append(ts)
 
-        # Count sync pulses — this is the true episode length
-        sync_timestamps = sorted(
-            ts for ts, topic, _ in episode_msgs if topic == SYNC_TOPIC
-        )
+    # Build progress maps
+    progress_maps = []
+    valid_episodes = []
+    for i, (sync_timestamps, (start_ns, end_ns)) in enumerate(zip(sync_per_episode, episodes)):
+        sync_timestamps = sorted(sync_timestamps)
         N = len(sync_timestamps)
-
         if N < MIN_EPISODE_FRAMES:
-            print(f"  Episode {ep_idx}: {N} sync frames — discarding (too short)")
+            print(f"  Episode {i}: {N} sync frames — discarding (too short)")
+            progress_maps.append(None)
+            valid_episodes.append(False)
+        else:
+            progress_maps.append({ts: float(j) / max(N - 1, 1) for j, ts in enumerate(sync_timestamps)})
+            valid_episodes.append(True)
+
+    # Pass 2: single stream, write all episodes simultaneously
+    out_files = []
+    writers = []
+    channel_ids_per_ep = []
+    progress_channel_ids = []
+
+    for i, (start_ns, end_ns) in enumerate(episodes):
+        if not valid_episodes[i]:
+            out_files.append(None)
+            writers.append(None)
+            channel_ids_per_ep.append(None)
+            progress_channel_ids.append(None)
             continue
 
-        # Build progress map: sync_ts_ns → progress_value [0.0, 1.0]
-        progress_map = {
-            ts: float(i) / max(N - 1, 1)
-            for i, ts in enumerate(sync_timestamps)
-        }
+        out_path = os.path.join(output_dir, f"episode_{episode_offset + i:03d}.mcap")
+        f = open(out_path, "wb")
+        writer = Writer(f)
+        writer.start()
 
-        # Write episode bag
-        with open(out_path, "wb") as f:
-            writer = Writer(f)
-            writer.start()
+        channel_ids = {}
+        for topic, (schema, channel) in channel_meta.items():
+            sid = writer.register_schema(name=schema.name, encoding=schema.encoding, data=schema.data)
+            cid = writer.register_channel(topic=topic, message_encoding=channel.message_encoding, schema_id=sid, metadata=dict(channel.metadata))
+            channel_ids[topic] = cid
 
-            # Register original channels
-            channel_ids = {}
-            for topic, (schema, channel) in channel_meta.items():
-                if any(t == topic for _, t, _ in episode_msgs):
-                    sid = writer.register_schema(
-                        name=schema.name,
-                        encoding=schema.encoding,
-                        data=schema.data,
-                    )
-                    cid = writer.register_channel(
-                        topic=topic,
-                        message_encoding=channel.message_encoding,
-                        schema_id=sid,
-                        metadata=dict(channel.metadata),
-                    )
-                    channel_ids[topic] = cid
+        progress_schema_id = writer.register_schema(name="std_msgs/msg/Float32", encoding="ros2msg", data=b"float32 data\n")
+        progress_channel_id = writer.register_channel(topic="/progress", message_encoding="cdr", schema_id=progress_schema_id)
 
-            # Register /progress channel
-            progress_schema_id = writer.register_schema(
-                name="std_msgs/msg/Float32",
-                encoding="ros2msg",
-                data=b"float32 data\n",
-            )
-            progress_channel_id = writer.register_channel(
-                topic="/progress",
-                message_encoding="cdr",
-                schema_id=progress_schema_id,
-            )
+        out_files.append(f)
+        writers.append(writer)
+        channel_ids_per_ep.append(channel_ids)
+        progress_channel_ids.append(progress_channel_id)
+        
 
-            # Write all messages in time order
-            for ts, topic, data in sorted(episode_msgs, key=lambda x: x[0]):
-                if topic not in channel_ids:
+    # Single streaming pass
+    with open(mcap_path, "rb") as f:
+        reader = make_reader(f)
+        for schema, channel, message in tqdm(reader.iter_messages(topics=EPISODE_TOPICS), desc="Chunking"):
+            ts = message.publish_time
+            for i, (start_ns, end_ns) in enumerate(episodes):
+                if not valid_episodes[i] or not (start_ns <= ts <= end_ns):
+                    continue
+                if channel.topic not in channel_ids_per_ep[i]:
                     continue
 
-                writer.add_message(
-                    channel_id=channel_ids[topic],
-                    log_time=ts,
-                    data=data,
-                    publish_time=ts,
-                )
+                writers[i].add_message(channel_id=channel_ids_per_ep[i][channel.topic], log_time=ts, data=message.data, publish_time=ts)
 
-                # Inject /progress alongside each /sync_pulse message
-                if topic == SYNC_TOPIC:
-                    writer.add_message(
-                        channel_id=progress_channel_id,
-                        log_time=ts,
-                        data=encode_float32(progress_map[ts]),
-                        publish_time=ts,
-                    )
+                if channel.topic == SYNC_TOPIC and ts in progress_maps[i]:
+                    writers[i].add_message(channel_id=progress_channel_ids[i], log_time=ts, data=encode_float32(progress_maps[i][ts]), publish_time=ts)
 
+    # Close all writers
+    valid_count = 0
+    for i, writer in enumerate(writers):
+        if writer is not None:
             writer.finish()
-
-        print(f"  Episode {ep_idx}: {N} frames → {out_path}")
-        valid_count += 1
-
+            out_files[i].close()
+            print(f"  Episode {i}: → episode_{i:03d}.mcap")
+            valid_count += 1
+    
     print(f"\nDone. {valid_count}/{len(episodes)} episodes saved to {output_dir}")
+    return episode_offset + len(episodes)
 
 
 if __name__ == "__main__":
@@ -216,6 +205,7 @@ if __name__ == "__main__":
         print(f"No sessions found in {raw_base}")
         exit(1)
 
+    episode_offset = 0
     for session in sessions:
         print(f"\nProcessing: {session}")
-        chunk_bag(session, out_base)
+        episode_offset = chunk_bag(session, out_base, episode_offset)
