@@ -161,4 +161,15 @@ data/
 └── lerobot/      - HuggingFace datasets (ready for training)
 ```
 
+
+min_max maps [observed_min, observed_max] → [-1, 1]. It is defined by the extremes of your data. For absolute joint positions this works well — physical joint limits give you a natural, meaningful range that fills the entire [-1,1] space uniformly.
+For delta actions the distribution looks like this:
+most deltas cluster near 0
+│
+▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+     ─────────────────────
+-max_delta              +max_delta
+The rare large motions at the extremes define min and max. After min_max normalization, 90% of your deltas are compressed into a tiny band around 0.0 in [-1,1] space. The model has to predict with very high precision in that tiny band — a small prediction error in normalized space corresponds to a large error in actual delta space.
+mean_std maps by subtracting the mean and dividing by std. Since deltas are zero-mean by construction (mean ≈ 0), the normalization just scales by spread. The common small deltas spread across a reasonable range of the normalized space, and the model can distinguish between them easily.
+The UMI paper (Chi et al., RSS 2023) uses this implicitly — their LinearNormalizer in the reference implementation defaults to limits mode for absolute actions and gaussian (mean_std) for delta/relative actions in their real robot configs. Check it directly:
 ---

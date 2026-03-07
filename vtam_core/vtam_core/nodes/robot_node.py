@@ -58,7 +58,6 @@ class VtamControlLoop(Node):
                 with self.lock:
                     # Tracker is essential for EE poses, so we run it constantly
                     self.head_tracker.tick()
-                    #pass
                 # Tiny sleep to prevent 100% CPU burn-up
                 time.sleep(0.033)
             except Exception as e:
@@ -80,7 +79,7 @@ class VtamControlLoop(Node):
             # 2. Data Sync Pulse (~30Hz)
             # We pulse 3 times every 5 ticks (3/5 * 50 = 30Hz)
             self.tick_count += 1
-            if self.tick_count % 5 in [1, 3, 5]: 
+            if self.tick_count % 5 in [0, 2, 4]:
                 self.publish_sync_pulse()
             
             if self.tick_count >= 5:

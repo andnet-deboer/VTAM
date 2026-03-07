@@ -85,22 +85,22 @@ class TrajectoryRetargeter:
 
         # --- Differential IK Parameters ---
         self.damping = 0.05            # λ for DLS: J^T(JJ^T + λ²I)^{-1}
-        self.max_linear_step = 0.01    # meters per frame clamp
-        self.max_angular_step = 0.1    # radians per frame clamp
-        self.max_joint_step_rev = 0.1  # max revolute joint displacement per frame (rad)
-        self.max_joint_step_pri = 0.01 # max prismatic joint displacement per frame (m)
+        self.max_linear_step = 0.05    # meters per frame clamp
+        self.max_angular_step = 0.3    # radians per frame clamp
+        self.max_joint_step_rev = 1.0  # max revolute joint displacement per frame (rad)
+        self.max_joint_step_pri = 0.25 # max prismatic joint displacement per frame (m)
         self.convergence_thresh = 1e-4 # Cartesian error norm to consider "converged"
-        self.max_inner_iters = 5       # sub-steps if step gets clamped
+        self.max_inner_iters = 50       # sub-steps if step gets clamped
 
         # --- Joint Weights (higher = less motion) ---
         # 7-DOF Weights: Prioritize Rotation to align the heading
         self.joint_weights = np.array([
-            0.5,   # base rotation (Making it cheap to face the target)
-            0.1,   # base translation (Slightly expensive)
+            0.6,   # base rotation (Making it cheap to face the target)
+            0.9,   # base translation (Slightly expensive)
             1.0,   # lift
             1.5,   # arm extension
-            2.0,   # wrist yaw
-            2.0,   # wrist pitch
+            0.3,   # wrist yaw
+            0.6,   # wrist pitch
             2.0,   # wrist roll
         ])
 

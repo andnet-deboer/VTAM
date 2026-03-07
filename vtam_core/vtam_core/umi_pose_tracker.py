@@ -89,6 +89,7 @@ class HeadPoseTracker:
         # ── Scan state ────────────────────────────────────────────────────────
         self.last_seen      = 0.0
         self.scanning       = False
+        self.has_locked = False
         self.scan_direction = 1.0   # +1 CCW, -1 CW
 
         # ── Latest pixel centroid ─────────────────────────────────────────────
@@ -152,7 +153,7 @@ class HeadPoseTracker:
     # ── Main tick ─────────────────────────────────────────────────────────────
 
     def tick(self):
-        if self.recording:
+        if self.has_locked:
             return
         now = time.time()
 
@@ -165,6 +166,8 @@ class HeadPoseTracker:
             self.node.get_logger().info("Target locked — stopping scan.")
             self.robot.head.get_joint('head_pan').set_velocity(0.0)
             self.scanning = False
+            self.has_locked = True
+            return    
 
         # Always read TRUE current joint positions — avoids snap-to-home bug
         try:
@@ -204,7 +207,6 @@ class HeadPoseTracker:
         if not self.scanning:
             self.node.get_logger().info("No target — starting scan.")
             self.scanning = True
-
         try:
             curr_pan = self.robot.head.status['head_pan']['pos']
 

@@ -11,13 +11,16 @@ from geometry_msgs.msg import Twist
 
 JOINT_NAMES = [
     'joint_lift', 'joint_arm_l0', 'joint_arm_l1', 'joint_arm_l2', 'joint_arm_l3',
-    'joint_wrist_yaw', 'joint_wrist_pitch', 'joint_wrist_roll', 'gripper_aperture'
+    'joint_wrist_yaw', 'joint_wrist_pitch', 'joint_wrist_roll',
+    'joint_gripper_finger_right'
 ]
 
 # Match HelloStretchIdx
 ORDERED_JOINTS = [
-    'base_x', 'base_y', 'base_theta', 'lift', 'arm',
-    'gripper_finger_right', 'wrist_roll', 'wrist_pitch', 'wrist_yaw'
+    'base_x', 'base_y', 'base_theta',
+    'joint_lift', 'joint_arm_l0',
+    'joint_gripper_finger_right', 'joint_wrist_roll',
+    'joint_wrist_pitch', 'joint_wrist_yaw'
 ]
 
 
@@ -46,7 +49,7 @@ class VTAMRobotNode(Node):
         self._cmd_vel = self.create_publisher(Twist, '/stretch/cmd_vel', 10)
         self._action_client = ActionClient(self, FollowJointTrajectory, '/stretch_controller/follow_joint_trajectory')
 
-        self.create_subscription(Image, '/camera_arm/color/image_rect_raw', self.img_cb, 10)
+        self.create_subscription(Image, '/gripper_camera/color/image_rect_raw', self.img_cb, 10)
         self.create_subscription(JointState, '/joint_states', self.joint_cb, 10)
 
         self.create_timer(1/30.0, self.publish_cycle)

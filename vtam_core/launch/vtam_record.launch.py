@@ -29,7 +29,6 @@ def generate_launch_description():
             'serial_no': '_128422270608',
             'camera_name': 'camera_arm',
             'rgb_camera.color_profile': '640x480x30',
-            'depth_module.profile': '640x480x30',
             'rgb_camera.enable_auto_exposure': 'true',
             'rgb_camera.auto_exposure_priority': 'false',  # prioritize framerate over exposure
             'rgb_camera.brightness': '50',        # 0-100, default ~50
@@ -37,7 +36,6 @@ def generate_launch_description():
             'rgb_camera.gamma': '300',            
             'rgb_camera.sharpness': '50',
             'rgb_camera.saturation': '64',
-            'align_depth.enable': 'true',
         }.items(),
     )
 

@@ -22,13 +22,13 @@ if not (portHandler.openPort() and portHandler.setBaudRate(BAUDRATE)):
     print("Failed to initialize port.")
     quit()
 
-# print("Scanning IDs 1-20...")
-# for dxl_id in range(16, 17):
-#     model, result, error = packetHandler.ping(portHandler, dxl_id)
-#     if result == COMM_SUCCESS:
-#         print(f"FOUND: [ID:{dxl_id:03d}] Model: {model}")
+print("Scanning IDs 1-20...")
+for dxl_id in range(13, ):
+    model, result, error = packetHandler.ping(portHandler, dxl_id)
+    if result == COMM_SUCCESS:
+        print(f"FOUND: [ID:{dxl_id:03d}] Model: {model}")
 
-dxl_id = 16
+# dxl_id = 16
 model, result, error = packetHandler.ping(portHandler, dxl_id)
 if result == COMM_SUCCESS:
         print(f"FOUND: [ID:{dxl_id:03d}] Model: {model}")

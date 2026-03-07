@@ -6,7 +6,7 @@
       - "/tf_static"
       - "/recording/active"
       - "/camera_arm/color/image_rect_raw/compressed"
-      - "/camera_arm/depth/image_rect_raw/compressedDepth"
+      # - "/camera_arm/depth/image_rect_raw/compressedDepth"
       - "/camera_arm/color/camera_info"
       - "/gripper_width_normalized"
       - "/joint_states"
@@ -17,3 +17,6 @@
       - "/viz/tactile_left"
       - "/viz/tactile_right"
       - "/viz/tactile_umi"
+    
+    camera_topics:
+      - "/camera_arm/color/image_rect_raw"
