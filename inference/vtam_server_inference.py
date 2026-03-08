@@ -90,10 +90,10 @@ def main():
     obs_sock.setsockopt(zmq.SUBSCRIBE, b"")
     obs_sock.setsockopt(zmq.CONFLATE, 1)
     obs_sock.setsockopt(zmq.RCVTIMEO, 5000)
-    obs_sock.connect(f"tcp://{ROBOT_IP}:{OBS_PORT}")
-
+    obs_sock.bind(f"tcp://*:{OBS_PORT}")
+    
     action_sock = ctx.socket(zmq.PUB)
-    action_sock.connect(f"tcp://{ROBOT_IP}:{CHUNK_PORT}")
+    action_sock.bind(f"tcp://*:{CHUNK_PORT}")
 
     time.sleep(0.5)
     print("Sockets ready. Waiting for observations...\n")
