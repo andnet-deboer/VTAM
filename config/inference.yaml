@@ -1,4 +1,5 @@
 robot_ip: "10.106.29.84"
+server_ip: "129.105.69.11"
 
 ports:
   obs: 4401
