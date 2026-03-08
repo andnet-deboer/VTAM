@@ -30,7 +30,7 @@ DEMO_POSE = np.array([
     0.0,    # base_y
     0.0,    # base_theta vel — no base motion
     0.80,   # lift
-    0.10,   # arm extension
+    0.12,   # arm extension
     0.0,    # wrist_roll
     0.0,    # wrist_pitch — flat/horizontal
     0.0,    # wrist_yaw
@@ -53,7 +53,7 @@ def main():
 
     # Send several times to ensure delivery over ZMQ PUB
     msg = pickle.dumps({"joint": DEMO_POSE.tolist()})
-    for _ in range(5):
+    for _ in range(15):
         sock.send(msg)
         time.sleep(0.1)
 

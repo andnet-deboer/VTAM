@@ -90,7 +90,15 @@ Extract EE poses from `/tf`, run workspace projection, build LeRobot dataset.
 ```bash
 python3 ~/VTAM/training/scripts/process_demo.py default_demo --push-to-hub
 ```
+python3 ~/VTAM/training/scripts/process_demo.py \
+    place_coffee_cup \
+    --fps 10 \
+    --force \
+    --tactile \
+    --repo-id andnetdeboer/vtam_place_coffee_cup_tactile \
+    --push-to-hub
 
+    
 **What this does:**
 - Extracts UMI hand pose from `/tf` at each camera frame timestamp
 - Calls `workspace_projection.project()` → canonical EE pose (N, 7)

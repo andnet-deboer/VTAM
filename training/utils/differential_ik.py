@@ -108,7 +108,7 @@ class TrajectoryRetargeter:
         self.neutral_q = np.array([
             0.0,    # base rotation — centered
             0.0,    # base translation — centered
-            0.89,   # lift — tabletop height (from dex_teleop)
+            0.93,   # lift — tabletop height (from dex_teleop)
             0.05,   # arm extension — nearly retracted, max room to extend
             0.0,    # wrist yaw — centered
             0.0,    # wrist pitch — centered

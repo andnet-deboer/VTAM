@@ -179,7 +179,7 @@ class OnlineIK(TrajectoryRetargeter):
             jp[2],   # base_theta  → base_rotation
             jp[0],   # base_x      → base_translation
             jp[3],   # joint_lift
-            jp[4],   # joint_arm_l0
+            jp[4]*4,   # joint_arm_l0
             jp[8],   # joint_wrist_yaw
             jp[7],   # joint_wrist_pitch
             jp[6],   # joint_wrist_roll
@@ -237,7 +237,7 @@ def main():
     print(f"EE pose[0]:    {ee_poses[0]}")
     print(f"Gripper range: min={min(grippers):.3f} max={max(grippers):.3f}\n")
 
-    print("Computing T_rel matrices...")
+    print("Computing absolute EP matrices (PD2.1)...")
 
     def tf_to_mat(p):
         T = np.eye(4)
@@ -245,10 +245,9 @@ def main():
         T[:3, 3]  = p[:3]
         return T
 
-    T_rel_mats = []
-    for t in range(n_frames - 1):
-        T_rel_mats.append(np.linalg.inv(tf_to_mat(ee_poses[t])) @ tf_to_mat(ee_poses[t + 1]))
-    print(f"Computed {len(T_rel_mats)} deltas\n")
+    ep_mats = [tf_to_mat(p) for p in ee_poses]
+    CHUNK_SIZE = 15
+    print(f"Loaded {len(ep_mats)} absolute poses, chunk_size={CHUNK_SIZE}\n")
 
     print("Initialising IK solver...")
     ik = OnlineIK()
@@ -280,69 +279,76 @@ def main():
     print(f"{'Frame':<7} {'PosErr(mm)':<13} {'OriErr(deg)':<13} {'Lift':<8} {'Arm':<8} {'Gripper':<10} {'Status'}")
     print("-" * 75)
 
-    for i, T_rel in enumerate(T_rel_mats):
-        t_start = time.time()
+    for chunk_start in range(0, n_frames - 1, CHUNK_SIZE):
+        chunk_end = min(chunk_start + CHUNK_SIZE, n_frames - 1)
 
-        # Closed-loop: re-seed from actual robot state every frame
+        # PD2.1: re-seed once per chunk from real robot state
         if not args.dry_run:
             state = get_robot_state(ctx)
             ik.seed_from_robot_state(state, silent=True)
 
-        # FK of current real joints → current EE pose
+        # Record robot EE at chunk start as anchor
         cur_pos, cur_rot = ik.forward_kinematics(ik.q_current)
-        T_current = np.eye(4)
-        T_current[:3, :3] = cur_rot
-        T_current[:3, 3]  = cur_pos
+        T_t0_robot = np.eye(4)
+        T_t0_robot[:3,:3] = cur_rot
+        T_t0_robot[:3,3]  = cur_pos
 
-        # Apply delta in current EE local frame (right-multiply = UMI convention)
-        T_target    = T_current @ T_rel
-        target_pos  = T_target[:3, 3]
-        target_quat = Rotation.from_matrix(T_target[:3, :3]).as_quat()
+        # Episode anchor at chunk start
+        T_t0_ep_inv = np.linalg.inv(ep_mats[chunk_start])
 
-        q_prev = ik.q_current.copy()
-        q_new, pos_err, ori_err = ik.step_ik(ik.q_current, target_pos, target_quat)
-        ik.q_current = q_new
+        for i in range(chunk_start, chunk_end):
+            t_start = time.time()
 
-        gripper_norm = grippers[i + 1]
-        action_9d    = ik.joints_to_action(q_new, gripper_norm, q_prev, dt)
+            # PD2.1: all targets relative to same chunk anchor
+            T_chunk_rel = T_t0_ep_inv @ ep_mats[i + 1]
+            T_target    = T_t0_robot @ T_chunk_rel
+            target_pos  = T_target[:3, 3]
+            target_quat = Rotation.from_matrix(T_target[:3,:3]).as_quat()
 
-        pos_errors.append(pos_err)
-        ori_errors.append(ori_err)
+            q_prev = ik.q_current.copy()
+            q_new, pos_err, ori_err = ik.step_ik(ik.q_current, target_pos, target_quat)
+            ik.q_current = q_new
 
-        status = "OK"
-        if pos_err > WARN_POS_ERROR_M:
-            status = f"WARN pos={pos_err*1000:.0f}mm"
-        elif ori_err > WARN_ORI_ERROR_RAD:
-            status = f"WARN ori={np.degrees(ori_err):.1f}deg"
+            gripper_norm = grippers[i + 1]
+            action_9d    = ik.joints_to_action(q_new, gripper_norm, q_prev, dt)
 
-        print(
-            f"{i:<7} "
-            f"{pos_err*1000:<13.1f} "
-            f"{np.degrees(ori_err):<13.1f} "
-            f"{action_9d[3]:<8.3f} "
-            f"{action_9d[4]:<8.3f} "
-            f"{gripper_norm:<10.3f} "
-            f"{status}"
-        )
+            pos_errors.append(pos_err)
+            ori_errors.append(ori_err)
 
-        send_action(action_sock, action_9d, dry_run=args.dry_run)
+            status = "OK"
+            if pos_err > WARN_POS_ERROR_M:
+                status = f"WARN pos={pos_err*1000:.0f}mm"
+            elif ori_err > WARN_ORI_ERROR_RAD:
+                status = f"WARN ori={np.degrees(ori_err):.1f}deg"
 
-        elapsed = time.time() - t_start
-        sleep_t = dt - elapsed
-        if sleep_t > 0:
-            time.sleep(sleep_t)
-        elif elapsed > dt * 1.5:
-            print(f"  WARNING: Frame {i} took {elapsed*1000:.0f}ms (target {dt*1000:.0f}ms)")
+            print(
+                f"{i:<7} "
+                f"{pos_err*1000:<13.1f} "
+                f"{np.degrees(ori_err):<13.1f} "
+                f"{action_9d[3]:<8.3f} "
+                f"{action_9d[4]:<8.3f} "
+                f"{gripper_norm:<10.3f} "
+                f"{status}"
+            )
+
+            send_action(action_sock, action_9d, dry_run=args.dry_run)
+
+            elapsed = time.time() - t_start
+            sleep_t = dt - elapsed
+            if sleep_t > 0:
+                time.sleep(sleep_t)
+            elif elapsed > dt * 1.5:
+                print(f"  WARNING: Frame {i} took {elapsed*1000:.0f}ms (target {dt*1000:.0f}ms)")
 
     print("\n" + "=" * 60)
     print("Replay complete")
-    print(f"  Frames:           {len(T_rel_mats)}")
+    print(f"  Frames:           {len(ep_mats) - 1}")
     print(f"  Mean pos error:   {np.mean(pos_errors)*1000:.1f} mm")
     print(f"  Max pos error:    {np.max(pos_errors)*1000:.1f} mm")
     print(f"  Mean ori error:   {np.degrees(np.mean(ori_errors)):.1f} deg")
     print(f"  Max ori error:    {np.degrees(np.max(ori_errors)):.1f} deg")
     warn_frames = sum(1 for e in pos_errors if e > WARN_POS_ERROR_M)
-    print(f"  Frames > {WARN_POS_ERROR_M*1000:.0f}mm:  {warn_frames}/{len(T_rel_mats)}")
+    print(f"  Frames > {WARN_POS_ERROR_M*1000:.0f}mm:  {warn_frames}/{len(ep_mats) - 1}")
     print("=" * 60)
 
     if action_sock:

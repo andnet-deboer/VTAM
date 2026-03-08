@@ -11,7 +11,7 @@ import cv2
 import numpy as np
 import torch
 from datasets import Dataset, Features, Image, Sequence, Value
-from lerobot.common.datasets.video_utils import encode_video_frames, VideoFrame
+from lerobot.common.datasets.video_utils import encode_video_frames
 from PIL import Image as PILImage
 from safetensors.torch import save_file
 from scipy.spatial.transform import Rotation
@@ -41,7 +41,7 @@ STATE_DIM     = 8   # [x, y, z, qx, qy, qz, qw, gripper] (RAW Robot Base Frame)
 TACTILE_DIM   = 30  # 15 Left + 15 Right
 
 TF_CHAIN = [("base_link", "umi_disconnect"), ("umi_disconnect", "umi_gripper")]
-ACTION_ORDER = ["dx", "dy", "dz", "dqx", "dqy", "dqz", "dqw", "gripper"]
+ACTION_ORDER = ["x", "y", "z", "qx", "qy", "qz", "qw", "gripper"]  # absolute, transformed to chunk-relative at training time
 STATE_ORDER  = ["x", "y", "z", "qx", "qy", "qz", "qw", "gripper"]
 
 # ── TF & Topic helpers ────────────────────────────────────────────────────────
@@ -114,13 +114,9 @@ def process_episode(mcap_path, use_tactile=False):
     ee_raw, ee_t = extract_ee_pose(tf_data, tf_ts)
     ee_synced, imgs, grips = snap(ee_raw, ee_t), snap(img_buf, img_ts), snap(grip_buf, grip_ts)
     
-    actions_rel = []
-    for t in range(len(ee_synced)):
-        if t < len(ee_synced) - 1:
-            T_rel = np.linalg.inv(tf_to_matrix(ee_synced[t])) @ tf_to_matrix(ee_synced[t+1])
-            actions_rel.append(np.concatenate([T_rel[:3, 3], Rotation.from_matrix(T_rel[:3, :3]).as_quat()]))
-        else:
-            actions_rel.append(np.array([0,0,0,0,0,0,1]))
+    # PD2.1: store absolute EE poses as actions.
+    # chunk-relative transform inv(T_t0) @ T_ti applied in __getitem__ at training time.
+    actions_rel = [np.array(p, dtype=np.float32) for p in ee_synced]
 
     N = len(sync_ts)
     ep = {
@@ -129,6 +125,7 @@ def process_episode(mcap_path, use_tactile=False):
         'state': np.concatenate([np.array(ee_synced, np.float32), np.array(grips, np.float32)[:, None]], axis=1),
         'T': N
     }
+
     if use_tactile:
         tls, trs = snap(tl_buf, tl_ts), snap(tr_buf, tr_ts)
         ep['tactile'] = np.concatenate([np.array(tls), np.array(trs)], axis=1).astype(np.float32)
@@ -146,7 +143,7 @@ def main(args):
 
     mcap_paths = sorted(glob.glob(str(args.processed_dir/'*.mcap')))
     feat_dict = {
-        'observation.images.gripper': VideoFrame(),
+        'observation.images.gripper': {'path': Value('string'), 'timestamp': Value('float64')},
         'observation.state': Sequence(length=STATE_DIM, feature=Value('float32')),
         'action': Sequence(length=ACTION_DIM, feature=Value('float32')),
         'episode_index': Value('int64'), 'frame_index': Value('int64'),
@@ -193,8 +190,18 @@ def main(args):
     info = {'codebase_version': CODEBASE_VERSION, 'fps': args.fps, 'video': True, 'action_order': ACTION_ORDER, 'state_order': STATE_ORDER, 'image_size': {'gripper': list(IMAGE_SIZE)}, 'num_episodes': len(shard_paths), 'num_frames': cursor, 'task': args.task}
     
     # Final Stats & HF Save
-    stats = compute_stats(LeRobotDataset.from_preloaded(repo_id=args.repo_id, hf_dataset=hf_dataset.with_transform(hf_transform_to_torch), episode_data_index=episode_data_index, info=info, videos_dir=lerobot_dir/'videos'))
-    hf_dataset.save_to_disk(str(train_dir))
+    chunk_size = 15
+    delta_ts = {'action': [i / args.fps for i in range(chunk_size)]}
+    episode_data_index_t = {k: torch.tensor(v) for k, v in episode_data_index.items()}
+    stats = compute_stats(LeRobotDataset.from_preloaded(repo_id=args.repo_id, hf_dataset=hf_dataset.with_transform(hf_transform_to_torch), episode_data_index=episode_data_index_t, info=info, videos_dir=lerobot_dir/'videos', delta_timestamps=delta_ts))
+    # CLEANUP: remove shards so we don't upload duplicate data
+    if shard_dir.exists():
+        shutil.rmtree(str(shard_dir))
+    
+    # Export directly to Parquet to bypass HF server-side conversion bugs
+    data_dir = lerobot_dir / 'data'
+    data_dir.mkdir(parents=True, exist_ok=True)
+    hf_dataset.to_parquet(str(data_dir / 'train-00000-of-00001.parquet'))
     meta_dir.mkdir(parents=True, exist_ok=True)
     with open(meta_dir/'info.json', 'w') as f: json.dump(info, f, indent=4)
     save_file({k: torch.tensor(v) for k, v in episode_data_index.items()}, meta_dir/'episode_data_index.safetensors')
@@ -205,5 +212,5 @@ def main(args):
         api = HfApi(); api.upload_large_folder(folder_path=str(lerobot_dir), repo_id=args.repo_id, repo_type="dataset")
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(); parser.add_argument('demo_name', type=str); parser.add_argument('--fps', type=int, default=10); parser.add_argument('--force', action='store_true'); parser.add_argument('--push-to-hub', action='store_true'); parser.add_argument('--tactile', action='store_true'); args = parser.parse_args()
-    vtam_root = Path(__file__).resolve().parents[2]; args.task = args.demo_name; args.processed_dir = vtam_root/'data'/'processed'/args.demo_name; args.lerobot_dir = vtam_root/'data'/'lerobot'/args.demo_name; args.repo_id = f"andnetdeboer/vtam_{args.demo_name}"; main(args)
+    parser = argparse.ArgumentParser(); parser.add_argument('demo_name', type=str); parser.add_argument('--fps', type=int, default=10); parser.add_argument('--force', action='store_true'); parser.add_argument('--push-to-hub', action='store_true'); parser.add_argument('--tactile', action='store_true'); parser.add_argument('--repo-id', type=str, default=None); args = parser.parse_args()
+    vtam_root = Path(__file__).resolve().parents[2]; args.task = args.demo_name; args.processed_dir = vtam_root/'data'/'processed'/args.demo_name; args.lerobot_dir = vtam_root/'data'/'lerobot'/args.demo_name; args.repo_id = args.repo_id or f"andnetdeboer/vtam_{args.demo_name}"; main(args)

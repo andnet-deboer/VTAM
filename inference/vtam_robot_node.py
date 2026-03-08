@@ -159,14 +159,14 @@ class VTAMRobotNode(Node):
                 targets = action
 
             if targets is not None:
-                self.execute_replay_style(targets)
+                self.execute_trajectory(targets)
 
         except zmq.Again:
             pass
         except Exception as e:
             self.get_logger().error(f"Action error: {e}")
 
-    def execute_replay_style(self, targets):
+    def execute_trajectory(self, targets):
         if len(targets) < 9:
             self.get_logger().warn(f"Unexpected action length: {len(targets)}")
             return

@@ -1,0 +1,12 @@
+robot_ip: "10.106.29.84"
+
+ports:
+  obs: 4401
+  action: 4402
+  state: 4403
+  chunk: 4405
+
+policy_path: "/home/kmy2091/VTAM/dependencies/lerobot/outputs/train/2026-03-07/04-59-12_stretch_real_act_stretch_act_stationary/checkpoints/014000/pretrained_model"
+device: "cuda:1"
+fps: 10
+chunk_size: 15
