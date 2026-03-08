@@ -1,29 +1,12 @@
 #!/usr/bin/env python3
 """
-replay_demo.py — Replay a recorded MCAP demonstration on the Stretch robot.
-
-PURPOSE:
-    Validate the full inference pipeline (TF extraction → IK → ZMQ execution)
-    BEFORE training any policy. If the robot faithfully replays a demonstration,
-    the IK and action convention are correct. If not, fix them here first.
-
-PIPELINE:
-    1. Extract absolute EE poses from /tf in the MCAP
-    2. Compute T_rel[t] = inv(T_t) @ T_{t+1} for each frame pair
-    3. Each frame:
-        a. Read actual robot joint state from ZMQ port 4403
-        b. FK to get current EE pose in base_link
-        c. Apply T_rel in current EE local frame: T_target = T_current @ T_rel
-        d. IK solve to T_target → joint commands
-        e. Send to robot via ZMQ port 4402
+replay_demo.py — Replay a recorded MCAP demonstration on the Stretch robot,
+                 or run live policy inference (--mode inference).
 
 USAGE:
-    python3 replay_demo.py place_coffee_cup/episode_000.mcap --dry-run
-    python3 replay_demo.py place_coffee_cup/episode_000.mcap
-    python3 replay_demo.py place_coffee_cup/episode_000.mcap --fps 5
-
-RUN ON:
-    Robot (stretch-se3-3047) — needs ZMQ connection to vtam_robot_node.py
+    python3 replay_demo.py episode.mcap --dry-run
+    python3 replay_demo.py episode.mcap
+    python3 replay_demo.py --mode inference
 """
 
 import argparse
@@ -50,7 +33,11 @@ from training.utils.differential_ik import TrajectoryRetargeter
 ROBOT_IP           = "localhost"
 ZMQ_STATE_PORT     = 4403
 ZMQ_ACTION_PORT    = 4402
+ZMQ_OBS_PORT       = 4401   # recv rgb from vtam_robot_node (inference mode)
+ZMQ_FWD_PORT       = 4406   # send obs to sheep             (inference mode)
+ZMQ_CHUNK_PORT     = 4405   # recv action from sheep        (inference mode)
 DEFAULT_FPS        = 10
+CHUNK_SIZE         = 15
 
 GRIPPER_OPEN       = 1.1
 GRIPPER_CLOSED     = -0.5
@@ -176,13 +163,13 @@ class OnlineIK(TrajectoryRetargeter):
             return
 
         self.q_current = np.array([
-            jp[2],   # base_theta  → base_rotation
-            jp[0],   # base_x      → base_translation
-            jp[3],   # joint_lift
-            jp[4]*4,   # joint_arm_l0
-            jp[8],   # joint_wrist_yaw
-            jp[7],   # joint_wrist_pitch
-            jp[6],   # joint_wrist_roll
+            jp[2],     # base_theta  → base_rotation
+            jp[0],     # base_x      → base_translation
+            jp[3],     # joint_lift
+            jp[4] * 4, # joint_arm_l0
+            jp[8],     # joint_wrist_yaw
+            jp[7],     # joint_wrist_pitch
+            jp[6],     # joint_wrist_roll
         ])
         if not silent:
             print(f"Seeded IK: lift={jp[3]:.3f} arm={jp[4]:.3f} "
@@ -198,63 +185,77 @@ class OnlineIK(TrajectoryRetargeter):
             base_linear_vel,
             0.0,
             base_angular_vel,
-            q7[2],   # lift
-            q7[3],   # arm
-            q7[6],   # wrist_roll
-            q7[5],   # wrist_pitch
-            q7[4],   # wrist_yaw
+            q7[2],  # lift
+            q7[3],  # arm
+            q7[6],  # wrist_roll
+            q7[5],  # wrist_pitch
+            q7[4],  # wrist_yaw
             gripper_hw,
         ], dtype=np.float32)
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("mcap", type=str)
+    parser.add_argument("mcap", type=str, nargs="?", default=None)
+    parser.add_argument("--mode", choices=["replay", "inference"], default="replay")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--fps", type=float, default=DEFAULT_FPS)
     args = parser.parse_args()
 
-    mcap_path = Path(args.mcap)
-    if not mcap_path.exists():
-        candidate = Path(VTAM_ROOT) / "data" / "processed" / args.mcap
-        if candidate.exists():
-            mcap_path = candidate
-        else:
-            print(f"ERROR: MCAP file not found: {args.mcap}")
-            sys.exit(1)
+    if args.mode == "replay" and args.mcap is None:
+        print("ERROR: mcap path required for replay mode")
+        sys.exit(1)
 
-    print(f"\n{'='*60}")
-    print(f"VTAM Demo Replay")
-    print(f"{'='*60}")
-    print(f"MCAP:    {mcap_path}")
-    print(f"FPS:     {args.fps}")
-    print(f"Dry run: {args.dry_run}")
-    print(f"{'='*60}\n")
+    dt = 1.0 / args.fps
 
-    print("Extracting EE poses from MCAP...")
-    ee_poses, grippers, n_frames = extract_episode(str(mcap_path))
-    print(f"Extracted {n_frames} frames")
-    print(f"EE pose[0]:    {ee_poses[0]}")
-    print(f"Gripper range: min={min(grippers):.3f} max={max(grippers):.3f}\n")
+    # ── Mode-specific setup ───────────────────────────────────────────────────
+    if args.mode == "replay":
+        mcap_path = Path(args.mcap)
+        if not mcap_path.exists():
+            candidate = Path(VTAM_ROOT) / "data" / "processed" / args.mcap
+            if candidate.exists():
+                mcap_path = candidate
+            else:
+                print(f"ERROR: MCAP file not found: {args.mcap}")
+                sys.exit(1)
 
-    print("Computing absolute EP matrices (PD2.1)...")
+        print(f"\n{'='*60}")
+        print(f"VTAM Demo Replay")
+        print(f"{'='*60}")
+        print(f"MCAP:    {mcap_path}")
+        print(f"FPS:     {args.fps}  dry_run: {args.dry_run}")
+        print(f"{'='*60}\n")
 
-    def tf_to_mat(p):
-        T = np.eye(4)
-        T[:3, :3] = Rotation.from_quat(p[3:]).as_matrix()
-        T[:3, 3]  = p[:3]
-        return T
+        print("Extracting EE poses from MCAP...")
+        ee_poses, grippers, n_frames = extract_episode(str(mcap_path))
+        print(f"Extracted {n_frames} frames")
+        print(f"EE pose[0]:    {ee_poses[0]}")
+        print(f"Gripper range: min={min(grippers):.3f} max={max(grippers):.3f}\n")
 
-    ep_mats = [tf_to_mat(p) for p in ee_poses]
-    CHUNK_SIZE = 15
-    print(f"Loaded {len(ep_mats)} absolute poses, chunk_size={CHUNK_SIZE}\n")
+        def tf_to_mat(p):
+            T = np.eye(4)
+            T[:3, :3] = Rotation.from_quat(p[3:]).as_matrix()
+            T[:3, 3]  = p[:3]
+            return T
 
+        ep_mats = [tf_to_mat(p) for p in ee_poses]
+        print(f"Loaded {len(ep_mats)} absolute poses, chunk_size={CHUNK_SIZE}\n")
+
+    else:
+        print(f"\n{'='*60}")
+        print(f"VTAM Policy Inference")
+        print(f"{'='*60}")
+        print(f"FPS: {args.fps}  dry_run: {args.dry_run}")
+        print(f"{'='*60}\n")
+
+    # ── IK + ZMQ setup (shared) ───────────────────────────────────────────────
     print("Initialising IK solver...")
     ik = OnlineIK()
 
+    ctx = zmq.Context()
+
     if not args.dry_run:
         print(f"Connecting to robot state on port {ZMQ_STATE_PORT}...")
-        ctx = zmq.Context()
         try:
             state = get_robot_state(ctx)
             ik.seed_from_robot_state(state)
@@ -265,22 +266,44 @@ def main():
         action_sock = ctx.socket(zmq.PUB)
         action_sock.connect(f"tcp://{ROBOT_IP}:{ZMQ_ACTION_PORT}")
         time.sleep(0.5)
-        print("Connected to robot. Starting replay in 3 seconds...")
-        time.sleep(3.0)
     else:
-        ctx = None
         action_sock = None
         print("DRY RUN — using neutral IK seed\n")
 
-    dt         = 1.0 / args.fps
+    # inference-only sockets — set up once before the loop
+    if args.mode == "inference":
+        obs_sock = ctx.socket(zmq.SUB)
+        obs_sock.setsockopt(zmq.SUBSCRIBE, b"")
+        obs_sock.setsockopt(zmq.CONFLATE, 1)
+        obs_sock.connect(f"tcp://localhost:{ZMQ_OBS_PORT}")
+
+        fwd_sock = ctx.socket(zmq.PUB)
+        fwd_sock.bind(f"tcp://*:{ZMQ_FWD_PORT}")
+
+        action_in = ctx.socket(zmq.SUB)
+        action_in.setsockopt(zmq.SUBSCRIBE, b"")
+        action_in.setsockopt(zmq.CONFLATE, 1)
+        action_in.bind(f"tcp://*:{ZMQ_CHUNK_PORT}")
+        time.sleep(0.5)
+        print("Sockets ready. Waiting for actions from sheep...\n")
+
+    # ── Main loop (shared) ────────────────────────────────────────────────────
     pos_errors = []
     ori_errors = []
 
-    print(f"{'Frame':<7} {'PosErr(mm)':<13} {'OriErr(deg)':<13} {'Lift':<8} {'Arm':<8} {'Gripper':<10} {'Status'}")
+    print(f"{'Frame':<7} {'PosErr(mm)':<13} {'OriErr(deg)':<13} "
+          f"{'Lift':<8} {'Arm':<8} {'Gripper':<10} {'Status'}")
     print("-" * 75)
 
-    for chunk_start in range(0, n_frames - 1, CHUNK_SIZE):
-        chunk_end = min(chunk_start + CHUNK_SIZE, n_frames - 1)
+    if args.mode == "replay":
+        print("Connected. Starting replay in 3 seconds...")
+        time.sleep(3.0)
+        chunk_iter = range(0, n_frames - 1, CHUNK_SIZE)
+    else:
+        chunk_iter = iter(int, 1)  # infinite
+
+    step = 0
+    for chunk_start in chunk_iter:
 
         # PD2.1: re-seed once per chunk from real robot state
         if not args.dry_run:
@@ -288,29 +311,56 @@ def main():
             ik.seed_from_robot_state(state, silent=True)
 
         # Record robot EE at chunk start as anchor
-        cur_pos, cur_rot = ik.forward_kinematics(ik.q_current)
-        T_t0_robot = np.eye(4)
-        T_t0_robot[:3,:3] = cur_rot
-        T_t0_robot[:3,3]  = cur_pos
+        cur_pos, cur_rot    = ik.forward_kinematics(ik.q_current)
+        T_t0_robot          = np.eye(4)
+        T_t0_robot[:3, :3]  = cur_rot
+        T_t0_robot[:3,  3]  = cur_pos
 
-        # Episode anchor at chunk start
-        T_t0_ep_inv = np.linalg.inv(ep_mats[chunk_start])
+        if args.mode == "replay":
+            chunk_end   = min(chunk_start + CHUNK_SIZE, n_frames - 1)
+            T_t0_ep_inv = np.linalg.inv(ep_mats[chunk_start])
+            inner_range = range(chunk_start, chunk_end)
+        else:
+            inner_range = range(CHUNK_SIZE)
 
-        for i in range(chunk_start, chunk_end):
+        for i in inner_range:
             t_start = time.time()
 
-            # PD2.1: all targets relative to same chunk anchor
-            T_chunk_rel = T_t0_ep_inv @ ep_mats[i + 1]
+            # ── Only these two lines differ between modes ──────────────────
+            if args.mode == "replay":
+                T_chunk_rel  = T_t0_ep_inv @ ep_mats[i + 1]
+                gripper_norm = grippers[i + 1]
+            else:
+                # forward obs to sheep
+                try:
+                    obs = pickle.loads(obs_sock.recv(flags=zmq.NOBLOCK))
+                    jp  = state.get("joint_positions", [])
+                    state_8d = np.concatenate([
+                        cur_pos,
+                        Rotation.from_matrix(cur_rot).as_quat(),
+                        [float(jp[5]) if len(jp) > 5 else 0.0]
+                    ]).astype(np.float32)
+                    fwd_sock.send(pickle.dumps({"rgb": obs["rgb"], "state": state_8d}),
+                                  flags=zmq.NOBLOCK)
+                except zmq.Again:
+                    pass
+
+                action_8d           = pickle.loads(action_in.recv())
+                T_chunk_rel         = np.eye(4)
+                T_chunk_rel[:3, :3] = Rotation.from_quat(action_8d[3:7]).as_matrix()
+                T_chunk_rel[:3,  3] = action_8d[:3]
+                gripper_norm        = float(action_8d[7])
+
+            # ── PD2.1 + IK — identical for both modes ─────────────────────
             T_target    = T_t0_robot @ T_chunk_rel
             target_pos  = T_target[:3, 3]
-            target_quat = Rotation.from_matrix(T_target[:3,:3]).as_quat()
+            target_quat = Rotation.from_matrix(T_target[:3, :3]).as_quat()
 
             q_prev = ik.q_current.copy()
             q_new, pos_err, ori_err = ik.step_ik(ik.q_current, target_pos, target_quat)
             ik.q_current = q_new
 
-            gripper_norm = grippers[i + 1]
-            action_9d    = ik.joints_to_action(q_new, gripper_norm, q_prev, dt)
+            action_9d = ik.joints_to_action(q_new, gripper_norm, q_prev, dt)
 
             pos_errors.append(pos_err)
             ori_errors.append(ori_err)
@@ -322,7 +372,7 @@ def main():
                 status = f"WARN ori={np.degrees(ori_err):.1f}deg"
 
             print(
-                f"{i:<7} "
+                f"{step:<7} "
                 f"{pos_err*1000:<13.1f} "
                 f"{np.degrees(ori_err):<13.1f} "
                 f"{action_9d[3]:<8.3f} "
@@ -338,23 +388,25 @@ def main():
             if sleep_t > 0:
                 time.sleep(sleep_t)
             elif elapsed > dt * 1.5:
-                print(f"  WARNING: Frame {i} took {elapsed*1000:.0f}ms (target {dt*1000:.0f}ms)")
+                print(f"  WARNING: Frame {step} took {elapsed*1000:.0f}ms "
+                      f"(target {dt*1000:.0f}ms)")
+            step += 1
 
-    print("\n" + "=" * 60)
-    print("Replay complete")
-    print(f"  Frames:           {len(ep_mats) - 1}")
-    print(f"  Mean pos error:   {np.mean(pos_errors)*1000:.1f} mm")
-    print(f"  Max pos error:    {np.max(pos_errors)*1000:.1f} mm")
-    print(f"  Mean ori error:   {np.degrees(np.mean(ori_errors)):.1f} deg")
-    print(f"  Max ori error:    {np.degrees(np.max(ori_errors)):.1f} deg")
-    warn_frames = sum(1 for e in pos_errors if e > WARN_POS_ERROR_M)
-    print(f"  Frames > {WARN_POS_ERROR_M*1000:.0f}mm:  {warn_frames}/{len(ep_mats) - 1}")
-    print("=" * 60)
+    if args.mode == "replay":
+        print("\n" + "=" * 60)
+        print("Replay complete")
+        print(f"  Frames:           {step}")
+        print(f"  Mean pos error:   {np.mean(pos_errors)*1000:.1f} mm")
+        print(f"  Max pos error:    {np.max(pos_errors)*1000:.1f} mm")
+        print(f"  Mean ori error:   {np.degrees(np.mean(ori_errors)):.1f} deg")
+        print(f"  Max ori error:    {np.degrees(np.max(ori_errors)):.1f} deg")
+        warn_frames = sum(1 for e in pos_errors if e > WARN_POS_ERROR_M)
+        print(f"  Frames > {WARN_POS_ERROR_M*1000:.0f}mm:  {warn_frames}/{step}")
+        print("=" * 60)
 
     if action_sock:
         action_sock.close()
-    if ctx:
-        ctx.term()
+    ctx.term()
 
 
 if __name__ == "__main__":
