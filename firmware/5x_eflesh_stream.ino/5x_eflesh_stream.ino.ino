@@ -11,6 +11,7 @@
 
 #include <Wire.h>
 #include <MLX90393.h>
+#include <Adafruit_ISM330DHCX.h>
 
 #define Serial SERIAL_PORT_USBVIRTUAL  // use default Serial if your board doesn't define this
 
@@ -18,6 +19,9 @@
 static const uint8_t NUM_SENSORS = 5;
 MLX90393 mlx[NUM_SENSORS];
 MLX90393::txyz dataBuf[NUM_SENSORS];
+
+// ISM330DHCX IMU
+Adafruit_ISM330DHCX ism;
 
 // Known sequences
 const uint8_t TARGETS_ALL_CONSEC[NUM_SENSORS] = {0x0C, 0x0D, 0x0E, 0x0F, 0x10};
@@ -43,6 +47,10 @@ void setup() {
   Wire.begin();
   Wire.setClock(400000);
   delay(10);
+
+  if (!ism.begin_I2C()) {
+    Serial.println("ISM330 not found!");
+  }
 
   uint8_t found[16] = {0};
   uint8_t foundCount = 0;
@@ -122,7 +130,14 @@ void loop() {
   }
   uint8_t btnState = (currentButtonState == LOW) ? 1 : 0;
   Serial.write(&btnState, 1);
-  Serial.println();
+  sensors_event_t accel, gyro, temp;
+  ism.getEvent(&accel, &gyro, &temp);
+  float imu[6] = {
+      accel.acceleration.x, accel.acceleration.y, accel.acceleration.z,
+      gyro.gyro.x, gyro.gyro.y, gyro.gyro.z
+  };
+  Serial.write((uint8_t*)imu, 24);
+  Serial.println();  // keep the \r\n terminator
 
   delayMicroseconds(500);
 }

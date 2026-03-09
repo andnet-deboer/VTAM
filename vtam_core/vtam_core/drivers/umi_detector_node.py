@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """
 UMI Cube Tracker
+
+References:
+https://gery.casiez.net/1euro/
+
+# Playground for tuning the 1€ filter parameters in real-time with interactive sliders:
+https://gery.casiez.net/1euro/InteractiveDemo/
+
 """
 
 import cv2
@@ -21,10 +28,8 @@ from ament_index_python.packages import get_package_share_directory
 from rclpy.time import Time
 from nav_msgs.msg import Path
 from std_srvs.srv import Empty
-from geometry_msgs.msg import PoseStamped
-from rclpy.qos import QoSProfile, DurabilityPolicy
-from geometry_msgs.msg import PointStamped 
-from vtam_core.nodes.imu_corrector import ImuCorrector
+from geometry_msgs.msg import PoseStamped, PointStamped
+from rclpy.qos import QoSProfile, DurabilityPolicy, qos_profile_sensor_data
 
 class OneEuroFilter:
     def __init__(self, freq, min_cutoff=1.0, beta=0.0, d_cutoff=1.0):
@@ -44,7 +49,9 @@ class OneEuroFilter:
         te = 1.0 / self.freq
         return 1.0 / (1.0 + tau / te)
 
-    def filter(self, x):
+    def filter(self, x, freq=None):
+        if freq is not None:
+            self.freq = freq
         if self.x_prev is None:
             self.x_prev = x
             self.dx_prev = np.zeros_like(x)
@@ -94,7 +101,7 @@ class AprilTagMarker:
     def update(self, corners, camera_matrix, dist_coeffs):
         half = self.length_mm / 2.0
         points_3D = np.array([[-half, half, 0], [half, half, 0], [half, -half, 0], [-half, -half, 0]])
-        _, rvec, tvec = cv2.solvePnP(points_3D, corners, camera_matrix, dist_coeffs)
+        _, rvec, tvec = cv2.solvePnP(points_3D, corners, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_IPPE_SQUARE)
         self.pos = tvec.flatten() / 1000.0
         R_mat = cv2.Rodrigues(rvec)[0]
         self.axes = [-R_mat[:3, 1], -R_mat[:3, 0], -R_mat[:3, 2]]
@@ -114,6 +121,7 @@ class UmiDetectorNode(Node):
         # Track startup time to suppress warnings during TF buffer warmup
         self.startup_time = self.get_clock().now()
         self.tf_ready = False
+        self.last_image_time = None
 
         # Path Publisher
         # Define the profile
@@ -153,12 +161,14 @@ class UmiDetectorNode(Node):
         self.declare_parameter('camera_optical_frame', 'camera_color_optical_frame')
 
         self.dictionary = aruco.getPredefinedDictionary(aruco.DICT_APRILTAG_36h11)
-        self.detector = aruco.ArucoDetector(self.dictionary, aruco.DetectorParameters())
+        parameters = aruco.DetectorParameters()
+        # Force OpenCV to use subpixel accuracy for the tag corners
+        parameters.cornerRefinementMethod = aruco.CORNER_REFINE_SUBPIX
+        self.detector = aruco.ArucoDetector(self.dictionary, parameters)
         self.collection, self.camera_info_dict, self.prev_cube_pose = {}, None, None
-        self.imu = ImuCorrector(self, imu_topic='/camera/camera/imu')
         
-        self.create_subscription(CameraInfo, 'camera/color/camera_info', self.info_cb, 10)
-        self.create_subscription(Image, 'camera/color/image_raw', self.image_cb, 10)
+        self.create_subscription(CameraInfo, 'camera/camera/color/camera_info', self.info_cb, qos_profile_sensor_data)
+        self.create_subscription(Image, 'camera/camera/color/image_raw', self.image_cb, qos_profile_sensor_data)
 
     def param_cb(self, params):
         for p in params:
@@ -191,6 +201,14 @@ class UmiDetectorNode(Node):
     def image_cb(self, msg):
         if self.camera_info_dict is None:
             return
+        
+        now_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        if self.last_image_time is not None:
+            dt = now_sec - self.last_image_time
+            actual_freq = 1.0 / dt if dt > 0 else 30.0
+        else:
+            actual_freq = 30.0
+        self.last_image_time = now_sec
 
         cv_img = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
         gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
@@ -251,13 +269,12 @@ class UmiDetectorNode(Node):
             # Explicitly fetch the latest transform
             # Increased timeout slightly to handle system jitter
             t = self.tf_buffer.lookup_transform(
-                'base_link', 
-                'camera_color_optical_frame', 
-                Time(seconds=0),
-                timeout=Duration(seconds=0.05)
-            )
-            
-            # Transformation matrices
+                    'base_link', 
+                    'camera_color_optical_frame', 
+                    Time(seconds=0),
+                    timeout=Duration(seconds=0.05)
+                )
+                        # Transformation matrices
             R_base_cam = R_scipy.from_quat([
                 t.transform.rotation.x, t.transform.rotation.y, 
                 t.transform.rotation.z, t.transform.rotation.w
@@ -267,8 +284,6 @@ class UmiDetectorNode(Node):
                 t.transform.translation.y, 
                 t.transform.translation.z
             ])
-            # IMU CORRECTION
-            # R_base_cam = self.imu.correct_rotation(R_base_cam)
 
             # Global Position
             fused_pos = T_base_cam + R_base_cam.apply(f_pos_cam)
@@ -279,17 +294,17 @@ class UmiDetectorNode(Node):
             fused_quat = (R_cube_world * R_fix).as_quat()
 
             # Filtering
-            fused_pos = self.pos_filter.filter(fused_pos)
+            fused_pos = self.pos_filter.filter(fused_pos, freq=actual_freq)
             if self.prev_cube_pose is not None:
                 if np.dot(fused_quat, self.prev_cube_pose['quat']) < 0:
                     fused_quat = -fused_quat
             
-            fq_raw = self.quat_filter.filter(fused_quat)
+            fq_raw = self.quat_filter.filter(fused_quat, freq=actual_freq)
             fused_quat = fq_raw / np.linalg.norm(fq_raw)
             self.prev_cube_pose = {'pos': fused_pos, 'quat': fused_quat}
 
             # Final rotation correction
-            R_correction = R_scipy.from_euler('z', 90, degrees=True)
+            R_correction = R_scipy.from_euler('z', 0, degrees=True)
             fused_quat_corrected = (R_scipy.from_quat(fused_quat) * R_correction).as_quat()
 
             # Broadcast frames only if we successfully calculated the pose
@@ -319,7 +334,10 @@ class UmiDetectorNode(Node):
             new_pose.pose.orientation.w = float(fused_quat_corrected[3])
 
             # Append to the path history
+            MAX_PATH_LEN = 500
             self.path_msg.poses.append(new_pose)
+            if len(self.path_msg.poses) > MAX_PATH_LEN:
+                self.path_msg.poses = self.path_msg.poses[-MAX_PATH_LEN:]
             
             # Update header and PUBLISH
             self.path_msg.header.stamp = now
