@@ -2,6 +2,8 @@
 """
 replay_demo.py — Replay a recorded MCAP demonstration on the Stretch robot,
                  or run live policy inference (--mode inference).
+replay_demo.py — Replay a recorded MCAP demonstration on the Stretch robot,
+                 or run live policy inference (--mode inference).
 
 PURPOSE:
     Validate the full inference pipeline (TF extraction → IK → ZMQ execution)
@@ -217,6 +219,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("mcap", type=str, nargs="?", default=None)
     parser.add_argument("--mode", choices=["replay", "inference"], default="replay")
+    parser.add_argument("mcap", type=str, nargs="?", default=None)
+    parser.add_argument("--mode", choices=["replay", "inference"], default="replay")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--fps", type=float, default=DEFAULT_FPS)
     args = parser.parse_args()
@@ -252,6 +256,7 @@ def main():
         print(f"EE pose[0]:    {ee_poses[0]}")
         print(f"Gripper range: min={min(grippers):.3f} max={max(grippers):.3f}\n")
 
+        print("Computing absolute EP matrices (PD2.1)...")
         print("Computing absolute EP matrices (PD2.1)...")
 
         def tf_to_mat(p):
