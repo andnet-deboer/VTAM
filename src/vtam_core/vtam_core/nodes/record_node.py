@@ -34,6 +34,8 @@ import time
 from datetime import datetime
 from sensor_msgs.msg import JointState
 import threading
+from tf2_msgs.msg import TFMessage
+from rclpy.qos import QoSProfile, DurabilityPolicy
 
 import rclpy
 from rclpy.node import Node
@@ -99,6 +101,11 @@ class RecordDemoNode(Node):
         self._tts_cache = os.path.expanduser("~/VTAM/data/assets/tts_cache")
         os.makedirs(self._save_dir, exist_ok=True)
         os.makedirs(self._tts_cache, exist_ok=True)
+
+        transient_qos = QoSProfile(depth=100, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self._static_tf_cache = None
+        self._static_sub = self.create_subscription(TFMessage, '/tf_static', self._static_tf_cb, transient_qos)
+        self._static_pub = self.create_publisher(TFMessage, '/tf_static', transient_qos)
 
         # Episode marker publisher
         latching_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -178,9 +185,9 @@ class RecordDemoNode(Node):
         threading.Thread(target=self._shutdown_bag, daemon=True).start()
         
     # ── Episode control ───────────────────────────────────────────────────────
-
     def _start_episode(self):
-        """Mark episode start in the bag."""
+        if self._static_tf_cache:
+            self._static_pub.publish(self._static_tf_cache)
         self._episode_active = True
         self._episode_pub.publish(Bool(data=True))
         self._play_sound("start")
