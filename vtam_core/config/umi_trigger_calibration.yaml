@@ -1,5 +1,0 @@
-/**:
-  ros__parameters:
-    baseline: 450.5
-    max_seen: 1200.0
-    is_calibrated: true
