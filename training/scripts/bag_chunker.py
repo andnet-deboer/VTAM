@@ -3,7 +3,7 @@
 chunk_bag.py — Split a session MCAP bag into per-episode MCAP bags.
 
 Pipeline position:
-    record_demo_node.py → session.mcap → chunk_bag.py → processed/episode_000.mcap, ...
+    record_demo_node.py → session.mcap → chunk_bag.py → chunked/episode_000.mcap, ...
                                                                 ↓
                                                         process_demo.py
 
@@ -16,9 +16,9 @@ Each output bag:
     - /progress (std_msgs/Float32) injected at each /sync_pulse timestamp [0.0 → 1.0]
 
 Usage:
-    python3 chunk_bag.py path/to/session/ data/processed/pickup_cup/
+    python3 chunk_bag.py path/to/session/ data/chunked/pickup_cup/
 
-    Output: data/processed/pickup_cup/episode_000.mcap, episode_001.mcap, ...
+    Output: data/chunked/pickup_cup/episode_000.mcap, episode_001.mcap, ...
 """
 
 import argparse
@@ -35,8 +35,8 @@ from tqdm import tqdm
 # ── Configuration ──────────────────────────────────────────────────────────────
 
 EPISODE_TOPIC = "/recording/active"
-SYNC_TOPIC    = "/sync_pulse"
-CONFIG_PATH = os.path.expanduser("~/VTAM/vtam_core/config/record.yaml")
+SYNC_TOPIC = "/sync_pulse"
+CONFIG_PATH = os.path.expanduser("~/VTAM/src/vtam_core/config/record.yaml")
 
 MIN_EPISODE_FRAMES = 30
 
@@ -194,7 +194,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     raw_base  = os.path.expanduser(f"~/VTAM/data/raw/{args.demo_name}")
-    out_base  = os.path.expanduser(f"~/VTAM/data/processed/{args.demo_name}")
+    out_base  = os.path.expanduser(f"~/VTAM/data/chunked/{args.demo_name}")
 
     if args.session:
         sessions = [os.path.join(raw_base, args.session)]

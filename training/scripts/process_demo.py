@@ -141,7 +141,7 @@ def main(args):
         if args.force: shutil.rmtree(lerobot_dir)
         else: print("Dir exists, use --force"); sys.exit(1)
 
-    mcap_paths = sorted(glob.glob(str(args.processed_dir/'*.mcap')))
+    mcap_paths = sorted(glob.glob(str(args.chunked_dir/'*.mcap')))
     feat_dict = {
         'observation.images.gripper': {'path': Value('string'), 'timestamp': Value('float64')},
         'observation.state': Sequence(length=STATE_DIM, feature=Value('float32')),
@@ -213,4 +213,4 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(); parser.add_argument('demo_name', type=str); parser.add_argument('--fps', type=int, default=10); parser.add_argument('--force', action='store_true'); parser.add_argument('--push-to-hub', action='store_true'); parser.add_argument('--tactile', action='store_true'); parser.add_argument('--repo-id', type=str, default=None); args = parser.parse_args()
-    vtam_root = Path(__file__).resolve().parents[2]; args.task = args.demo_name; args.processed_dir = vtam_root/'data'/'processed'/args.demo_name; args.lerobot_dir = vtam_root/'data'/'lerobot'/args.demo_name; args.repo_id = args.repo_id or f"andnetdeboer/vtam_{args.demo_name}"; main(args)
+    vtam_root = Path(__file__).resolve().parents[2]; args.task = args.demo_name; args.chunked_dir = vtam_root/'data'/'chunked'/args.demo_name; args.lerobot_dir = vtam_root/'data'/'lerobot'/args.demo_name; args.repo_id = args.repo_id or f"andnetdeboer/vtam_{args.demo_name}"; main(args)
