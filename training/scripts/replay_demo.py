@@ -3,10 +3,29 @@
 replay_demo.py — Replay a recorded MCAP demonstration on the Stretch robot,
                  or run live policy inference (--mode inference).
 
+PURPOSE:
+    Validate the full inference pipeline (TF extraction → IK → ZMQ execution)
+    BEFORE training any policy. If the robot faithfully replays a demonstration,
+    the IK and action convention are correct. If not, fix them here first.
+
+PIPELINE:
+    1. Extract absolute EE poses from /tf in the MCAP
+    2. Compute T_rel[t] = inv(T_t) @ T_{t+1} for each frame pair
+    3. Each frame:
+        a. Read actual robot joint state from ZMQ port 4403
+        b. FK to get current EE pose in base_link
+        c. Apply T_rel in current EE local frame: T_target = T_current @ T_rel
+        d. IK solve to T_target → joint commands
+        e. Send to robot via ZMQ port 4402
+
 USAGE:
-    python3 replay_demo.py episode.mcap --dry-run
-    python3 replay_demo.py episode.mcap
+    python3 replay_demo.py place_coffee_cup/episode_000.mcap --dry-run
+    python3 replay_demo.py place_coffee_cup/episode_000.mcap
+    python3 replay_demo.py place_coffee_cup/episode_000.mcap --fps 5
     python3 replay_demo.py --mode inference
+
+RUN ON:
+    Robot (stretch-se3-3047) — needs ZMQ connection to vtam_robot_node.py
 """
 
 import argparse
@@ -33,9 +52,9 @@ from training.utils.differential_ik import TrajectoryRetargeter
 ROBOT_IP           = "localhost"
 ZMQ_STATE_PORT     = 4403
 ZMQ_ACTION_PORT    = 4402
-ZMQ_OBS_PORT       = 4401   # recv rgb from vtam_robot_node (inference mode)
-ZMQ_FWD_PORT       = 4406   # send obs to sheep             (inference mode)
-ZMQ_CHUNK_PORT     = 4405   # recv action from sheep        (inference mode)
+ZMQ_OBS_PORT       = 4401   # recv rgb from vtam_robot_node  (inference only)
+ZMQ_FWD_PORT       = 4406   # send obs to sheep              (inference only)
+ZMQ_CHUNK_PORT     = 4405   # recv action from sheep         (inference only)
 DEFAULT_FPS        = 10
 CHUNK_SIZE         = 15
 
@@ -223,7 +242,8 @@ def main():
         print(f"VTAM Demo Replay")
         print(f"{'='*60}")
         print(f"MCAP:    {mcap_path}")
-        print(f"FPS:     {args.fps}  dry_run: {args.dry_run}")
+        print(f"FPS:     {args.fps}")
+        print(f"Dry run: {args.dry_run}")
         print(f"{'='*60}\n")
 
         print("Extracting EE poses from MCAP...")
@@ -232,12 +252,21 @@ def main():
         print(f"EE pose[0]:    {ee_poses[0]}")
         print(f"Gripper range: min={min(grippers):.3f} max={max(grippers):.3f}\n")
 
+        print("Computing absolute EP matrices (PD2.1)...")
+
+        def tf_to_mat(p):
+            T = np.eye(4)
+            T[:3, :3] = Rotation.from_quat(p[3:]).as_matrix()
+            T[:3, 3]  = p[:3]
+            return T
         def tf_to_mat(p):
             T = np.eye(4)
             T[:3, :3] = Rotation.from_quat(p[3:]).as_matrix()
             T[:3, 3]  = p[:3]
             return T
 
+        ep_mats = [tf_to_mat(p) for p in ee_poses]
+        print(f"Loaded {len(ep_mats)} absolute poses, chunk_size={CHUNK_SIZE}\n")
         ep_mats = [tf_to_mat(p) for p in ee_poses]
         print(f"Loaded {len(ep_mats)} absolute poses, chunk_size={CHUNK_SIZE}\n")
 
@@ -248,7 +277,7 @@ def main():
         print(f"FPS: {args.fps}  dry_run: {args.dry_run}")
         print(f"{'='*60}\n")
 
-    # ── IK + ZMQ setup (shared) ───────────────────────────────────────────────
+    # ── Shared setup ──────────────────────────────────────────────────────────
     print("Initialising IK solver...")
     ik = OnlineIK()
 
@@ -270,24 +299,26 @@ def main():
         action_sock = None
         print("DRY RUN — using neutral IK seed\n")
 
-    # inference-only sockets — set up once before the loop
+    # ── Inference-only sockets (set up once, before the loop) ────────────────
     if args.mode == "inference":
         obs_sock = ctx.socket(zmq.SUB)
         obs_sock.setsockopt(zmq.SUBSCRIBE, b"")
         obs_sock.setsockopt(zmq.CONFLATE, 1)
         obs_sock.connect(f"tcp://localhost:{ZMQ_OBS_PORT}")
 
+        SHEEP_IP = "129.105.69.11"
+
         fwd_sock = ctx.socket(zmq.PUB)
-        fwd_sock.bind(f"tcp://*:{ZMQ_FWD_PORT}")
+        fwd_sock.connect(f"tcp://{SHEEP_IP}:{ZMQ_FWD_PORT}")
 
         action_in = ctx.socket(zmq.SUB)
         action_in.setsockopt(zmq.SUBSCRIBE, b"")
         action_in.setsockopt(zmq.CONFLATE, 1)
-        action_in.bind(f"tcp://*:{ZMQ_CHUNK_PORT}")
+        action_in.connect(f"tcp://{SHEEP_IP}:{ZMQ_CHUNK_PORT}")
         time.sleep(0.5)
         print("Sockets ready. Waiting for actions from sheep...\n")
 
-    # ── Main loop (shared) ────────────────────────────────────────────────────
+    # ── Main loop ─────────────────────────────────────────────────────────────
     pos_errors = []
     ori_errors = []
 
@@ -326,24 +357,19 @@ def main():
         for i in inner_range:
             t_start = time.time()
 
-            # ── Only these two lines differ between modes ──────────────────
+            # ── Only these lines differ between modes ──────────────────────
             if args.mode == "replay":
                 T_chunk_rel  = T_t0_ep_inv @ ep_mats[i + 1]
                 gripper_norm = grippers[i + 1]
             else:
-                # forward obs to sheep
-                try:
-                    obs = pickle.loads(obs_sock.recv(flags=zmq.NOBLOCK))
-                    jp  = state.get("joint_positions", [])
-                    state_8d = np.concatenate([
-                        cur_pos,
-                        Rotation.from_matrix(cur_rot).as_quat(),
-                        [float(jp[5]) if len(jp) > 5 else 0.0]
-                    ]).astype(np.float32)
-                    fwd_sock.send(pickle.dumps({"rgb": obs["rgb"], "state": state_8d}),
-                                  flags=zmq.NOBLOCK)
-                except zmq.Again:
-                    pass
+                obs = pickle.loads(obs_sock.recv())  # block until obs arrives
+                jp  = state.get("joint_positions", [])
+                state_8d = np.concatenate([
+                    cur_pos,
+                    Rotation.from_matrix(cur_rot).as_quat(),
+                    [float(jp[5]) if len(jp) > 5 else 0.0]
+                ]).astype(np.float32)
+                fwd_sock.send(pickle.dumps({"rgb": obs["rgb"], "state": state_8d}), flags=zmq.NOBLOCK)
 
                 action_8d           = pickle.loads(action_in.recv())
                 T_chunk_rel         = np.eye(4)
@@ -388,8 +414,8 @@ def main():
             if sleep_t > 0:
                 time.sleep(sleep_t)
             elif elapsed > dt * 1.5:
-                print(f"  WARNING: Frame {step} took {elapsed*1000:.0f}ms "
-                      f"(target {dt*1000:.0f}ms)")
+                print(f"  WARNING: Frame {step} took {elapsed*1000:.0f}ms (target {dt*1000:.0f}ms)")
+
             step += 1
 
     if args.mode == "replay":
