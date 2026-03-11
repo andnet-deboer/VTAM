@@ -151,6 +151,9 @@ class RecordDemoNode(Node):
         msg.header.frame_id = "master_clock"
         self._sync_pub.publish(msg)
 
+    def _static_tf_cb(self, msg):
+        self._static_tf_cache = msg
+
     # ── Session bag ───────────────────────────────────────────────────────────
 
     def _start_session(self):
