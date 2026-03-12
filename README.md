@@ -1,5 +1,11 @@
+<div align="center">
+
 # VTAM
 ### Visuo-Tactile Assistive Manipulation
+
+<img width="317" height="402" alt="UMI (1)" src="https://github.com/user-attachments/assets/8415a7d1-ee2e-4f89-b267-54d740070a63" />
+
+</div>
 
 A UMI platform for the Hello Robot Stretch 3 that records and replays visuo-tactile demonstrations using imitation learning. The system synchronizes RGB, depth, joint, and tactile (eFlesh) sensor data during teleoperated demonstrations, then uses those recordings to train and run learned policies.
 
