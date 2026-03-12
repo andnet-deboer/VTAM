@@ -211,8 +211,8 @@ def process_episode(in_path, out_path, marker_info, args):
         quat_final = (R_scipy.from_quat(quat_base) * R_scipy.from_euler('z', 90, degrees=True)).as_quat()
         det_map[t_ns] = (pos_base, quat_final, pos_base + R_scipy.from_quat(quat_final).apply(GRIPPER_OFFSET))
 
-    if len(det_map) > 10:
-        det_map = smooth_trajectory_data(det_map, window=args.smooth_window)
+    # if len(det_map) > 10:
+    #     det_map = smooth_trajectory_data(det_map, window=args.smooth_window)
 
     # Write Output
     with open(in_path, "rb") as f_in, open(out_path, "wb") as f_out:
