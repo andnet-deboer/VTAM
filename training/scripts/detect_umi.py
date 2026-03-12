@@ -235,10 +235,10 @@ def process_episode(in_path, out_path, marker_info, args):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('demo_name', type=str)
-    parser.add_argument('--pos-min-cutoff', type=float, default=0.05)
-    parser.add_argument('--pos-beta', type=float, default=0.5)
-    parser.add_argument('--quat-min-cutoff', type=float, default=0.01)
-    parser.add_argument('--quat-beta', type=float, default=0.1)
+    parser.add_argument('--pos-min-cutoff', type=float, default=1.5)
+    parser.add_argument('--pos-beta', type=float, default=1.5)
+    parser.add_argument('--quat-min-cutoff', type=float, default=5.0)
+    parser.add_argument('--quat-beta', type=float, default=5.0)
     parser.add_argument('--smooth-window', type=int, default=3)
     args = parser.parse_args()
 
