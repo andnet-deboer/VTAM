@@ -211,8 +211,8 @@ def process_episode(in_path, out_path, marker_info, args):
         quat_final = (R_scipy.from_quat(quat_base) * R_scipy.from_euler('z', 90, degrees=True)).as_quat()
         det_map[t_ns] = (pos_base, quat_final, pos_base + R_scipy.from_quat(quat_final).apply(GRIPPER_OFFSET))
 
-    # if len(det_map) > 10:
-    #     det_map = smooth_trajectory_data(det_map, window=args.smooth_window)
+    if len(det_map) > 10:
+        det_map = smooth_trajectory_data(det_map, window=args.smooth_window)
 
     # Write Output
     with open(in_path, "rb") as f_in, open(out_path, "wb") as f_out:
@@ -239,7 +239,7 @@ def main():
     parser.add_argument('--pos-beta', type=float, default=0.5)
     parser.add_argument('--quat-min-cutoff', type=float, default=0.01)
     parser.add_argument('--quat-beta', type=float, default=0.1)
-    parser.add_argument('--smooth-window', type=int, default=11)
+    parser.add_argument('--smooth-window', type=int, default=3)
     args = parser.parse_args()
 
     with open(MARKER_YAML, 'r') as f: marker_info = yaml.safe_load(f)
