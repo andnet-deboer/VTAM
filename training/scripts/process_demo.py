@@ -27,6 +27,7 @@ VTAM_ROOT   = os.path.abspath(os.path.join(SCRIPT_DIR, '..', '..'))
 UTILS_DIR   = os.path.join(SCRIPT_DIR, '..', 'utils')
 LEROBOT_DIR = os.path.join(VTAM_ROOT, 'dependencies', 'lerobot')
 CONFIG_PATH = os.path.expanduser("~/VTAM/src/vtam_core/config/record.yaml")
+CHUNK_SIZE = 15
 
 sys.path.insert(0, UTILS_DIR)
 sys.path.insert(0, LEROBOT_DIR)
@@ -124,13 +125,26 @@ def process_episode(mcap_path, use_tactile=False):
     ee_raw, ee_t = extract_ee_pose(tf_data, tf_ts)
     ee_synced, imgs, grips = snap(ee_raw, ee_t), snap(img_buf, img_ts), snap(grip_buf, grip_ts)
 
-    actions_rel = [np.array(p, dtype=np.float32) for p in ee_synced]
+    # Convert absolute poses to 4x4 matrices
+    ee_mats = [tf_to_matrix(p) for p in ee_synced]
 
-    N = len(sync_ts)
+    # Compute relative poses per chunk
+    actions_rel = []
+    for i in range(len(ee_mats)):
+        chunk_start = (i // CHUNK_SIZE) * CHUNK_SIZE
+        T_t0_inv = np.linalg.inv(ee_mats[chunk_start])
+        T_rel = T_t0_inv @ ee_mats[i]
+        pos = T_rel[:3, 3]
+        quat = Rotation.from_matrix(T_rel[:3, :3]).as_quat()
+        actions_rel.append(np.concatenate([pos, quat]).astype(np.float32))
+
+    # State is also relative to chunk start
+    states_rel = actions_rel.copy()
+    N = len(sync_ts)  
     ep = {
-        'images': [PILImage.fromarray(img) for img in imgs],  # PIL images, not numpy
+        'images': [PILImage.fromarray(img) for img in imgs],
         'action': np.concatenate([np.array(actions_rel, np.float32), np.array(grips, np.float32)[:, None]], axis=1),
-        'state': np.concatenate([np.array(ee_synced, np.float32), np.array(grips, np.float32)[:, None]], axis=1),
+        'state': np.concatenate([np.array(states_rel, np.float32), np.array(grips, np.float32)[:, None]], axis=1),
         'T': N
     }
 
