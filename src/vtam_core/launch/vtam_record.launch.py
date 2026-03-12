@@ -63,7 +63,7 @@ def generate_launch_description():
         ]
     )
 
-    # UMI detector
+    # #UMI detector
     # umi_detector_node = TimerAction(
     #     period=4.0,
     #     actions=[Node(

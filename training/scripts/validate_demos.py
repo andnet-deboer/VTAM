@@ -32,7 +32,7 @@ import yaml
 from mcap_ros2.reader import read_ros2_messages
 
 # ── Config ──────────────────────────────────────────
-CONFIG_PATH = os.path.expanduser("~/VTAM/vtam_core/config/record.yaml")
+CONFIG_PATH = os.path.expanduser("~/VTAM/src/vtam_core/config/record.yaml")
 MIN_FRAMES  = 30   # episodes shorter than this are always an ERROR
 
 # Gripper thresholds (fraction of dataset median gripper range)

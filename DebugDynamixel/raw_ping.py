@@ -4,7 +4,7 @@ from dynamixel_sdk import *
 ### Uncomment for each specifc test, and update the DEVICENAME as needed ##
 
 # TEST #1: Address for wrist on Robot
-DEVICENAME = '/dev/hello-dynamixel-wrist'
+# DEVICENAME = '/dev/hello-dynamixel-wrist'
 
 # TEST #2 Address for U2D2 with my PC
 # DEVICENAME = '/dev/ttyUSB1'

@@ -21,11 +21,11 @@ from rosbags.typesys import Stores, get_typestore
 typestore   = get_typestore(Stores.ROS2_HUMBLE)
 Time        = typestore.types['builtin_interfaces/msg/Time']
 Header      = typestore.types['std_msgs/msg/Header']
-Point       = typestore.types['geometry_msgs/msg/Point']
 Quat        = typestore.types['geometry_msgs/msg/Quaternion']
-Pose        = typestore.types['geometry_msgs/msg/Pose']
-PoseStamped = typestore.types['geometry_msgs/msg/PoseStamped']
-NavPath     = typestore.types['nav_msgs/msg/Path']
+Vector3      = typestore.types['geometry_msgs/msg/Vector3']
+Transform    = typestore.types['geometry_msgs/msg/Transform']
+TransformStamped = typestore.types['geometry_msgs/msg/TransformStamped']
+TFMessage    = typestore.types['tf2_msgs/msg/TFMessage']
 
 # ── Config ────────────────────────────────────────────────────────────────────
 MARKER_YAML    = os.path.expanduser("~/VTAM/src/vtam_core/config/teleop_april_marker_info_86mm.yaml")
@@ -59,31 +59,16 @@ def smooth_trajectory_data(det_map, window=7):
         smoothed_map[t] = (avg_p, avg_q, avg_grip_p)
     return smoothed_map
 
-def make_pose_stamped(t_ns, frame_id, pos, quat):
+def make_tf_message(t_ns, parent, child, pos, quat):
     sec, nsec = int(t_ns // 10**9), int(t_ns % 10**9)
-    msg = PoseStamped(
-        header=Header(stamp=Time(sec=sec, nanosec=nsec), frame_id=frame_id),
-        pose=Pose(
-            position=Point(x=float(pos[0]), y=float(pos[1]), z=float(pos[2])),
-            orientation=Quat(x=float(quat[0]), y=float(quat[1]), z=float(quat[2]), w=float(quat[3])),
-        ),
-    )
-    return typestore.serialize_cdr(msg, 'geometry_msgs/msg/PoseStamped')
-
-def make_path(t_ns, frame_id, poses):
-    msg = NavPath(
-        header=Header(stamp=Time(sec=int(t_ns // 10**9), nanosec=int(t_ns % 10**9)), frame_id=frame_id),
-        poses=[
-            PoseStamped(
-                header=Header(stamp=Time(sec=int(pt // 10**9), nanosec=int(pt % 10**9)), frame_id=''),
-                pose=Pose(
-                    position=Point(x=float(p[0]), y=float(p[1]), z=float(p[2])),
-                    orientation=Quat(x=float(q[0]), y=float(q[1]), z=float(q[2]), w=float(q[3])),
-                ),
-            ) for pt, p, q in poses
-        ],
-    )
-    return typestore.serialize_cdr(msg, 'nav_msgs/msg/Path')
+    msg = TFMessage(transforms=[TransformStamped(
+        header=Header(stamp=Time(sec=sec, nanosec=nsec), frame_id=parent),
+        child_frame_id=child,
+        transform=Transform(
+            translation=Vector3(x=float(pos[0]), y=float(pos[1]), z=float(pos[2])),
+            rotation=Quat(x=float(quat[0]), y=float(quat[1]), z=float(quat[2]), w=float(quat[3])),
+        ))])
+    return typestore.serialize_cdr(msg, 'tf2_msgs/msg/TFMessage')
 
 # ── Math & Filters ────────────────────────────────────────────────────────────
 
@@ -156,12 +141,14 @@ def process_episode(in_path, out_path, marker_info, args):
     K, D, sync_ns, imgs = None, None, [], []
     tf_pan_raw, tf_pan_ts, tf_tilt_raw, tf_tilt_ts = [], [], [], []
 
-    for msg in read_ros2_messages(in_path):
+    with open(in_path, 'rb') as f:
+        r = make_reader(f)
+        for _, channel, message in r.iter_messages(topics=[SYNC_TOPIC]):
+            sync_ns.append(message.publish_time)
+
+    for msg in read_ros2_messages(in_path, topics=[CAM_INFO_TOPIC, IMAGE_TOPIC, TF_TOPIC]):
         t, topic = msg.publish_time_ns, msg.channel.topic
-        if topic == SYNC_TOPIC:
-            s = msg.ros_msg.header.stamp
-            sync_ns.append(s.sec * 10**9 + s.nanosec)
-        elif topic == CAM_INFO_TOPIC and K is None:
+        if topic == CAM_INFO_TOPIC and K is None:
             K, D = np.array(msg.ros_msg.k).reshape(3, 3), np.array(msg.ros_msg.d)
         elif topic == IMAGE_TOPIC:
             imgs.append((msg.ros_msg.data, t, t / 1e9))
@@ -173,7 +160,6 @@ def process_episode(in_path, out_path, marker_info, args):
                     tf_pan_raw.append(val); tf_pan_ts.append(t / 1e9)
                 elif tf.child_frame_id == 'link_head_tilt':
                     tf_tilt_raw.append(val); tf_tilt_ts.append(t / 1e9)
-
     if K is None or len(sync_ns) < 10: return False
     
     pan_data, pan_ts = np.array(tf_pan_raw), np.array(tf_pan_ts)
@@ -228,22 +214,21 @@ def process_episode(in_path, out_path, marker_info, args):
     if len(det_map) > 10:
         det_map = smooth_trajectory_data(det_map, window=args.smooth_window)
 
-    # ── Write Output ──
+    # Write Output
     with open(in_path, "rb") as f_in, open(out_path, "wb") as f_out:
         reader, writer = make_reader(f_in), Writer(f_out)
         writer.start()
-        # Schema setup...
-        p_sid = writer.register_schema(name="geometry_msgs/msg/PoseStamped", encoding="ros2msg", data=typestore.generate_msgdef('geometry_msgs/msg/PoseStamped')[0].encode())
-        cube_ch = writer.register_channel(topic="/umi_cube_pose", message_encoding="cdr", schema_id=p_sid)
-        
         summary = reader.get_summary()
         c_map = {cid: writer.register_channel(topic=ch.topic, message_encoding=ch.message_encoding, schema_id=writer.register_schema(name=summary.schemas[ch.schema_id].name, encoding=summary.schemas[ch.schema_id].encoding, data=summary.schemas[ch.schema_id].data)) for cid, ch in summary.channels.items()}
+        tf_sid = writer.register_schema(name="tf2_msgs/msg/TFMessage", encoding="ros2msg", data=typestore.generate_msgdef('tf2_msgs/msg/TFMessage')[0].encode())
+        tf_ch = writer.register_channel(topic="/tf", message_encoding="cdr", schema_id=tf_sid)
 
         for _, channel, msg in reader.iter_messages():
             writer.add_message(c_map[channel.id], msg.log_time, msg.data, msg.publish_time)
             if channel.topic == IMAGE_TOPIC and msg.publish_time in det_map:
                 p, q, _ = det_map[msg.publish_time]
-                writer.add_message(cube_ch, msg.log_time, make_pose_stamped(msg.publish_time, "base_link", p, q), msg.publish_time)
+                writer.add_message(tf_ch, msg.log_time, make_tf_message(msg.publish_time, "base_link", "umi_disconnect", p, q), msg.publish_time)
+                writer.add_message(tf_ch, msg.log_time, make_tf_message(msg.publish_time, "umi_disconnect", "umi_gripper", GRIPPER_OFFSET, [0,0,0,1]), msg.publish_time)
         writer.finish()
     return True
 

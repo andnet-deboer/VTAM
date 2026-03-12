@@ -101,7 +101,9 @@ def send_action(sock: zmq.Socket, targets_9d: np.ndarray, dry_run: bool = False)
 
 
 def extract_episode(mcap_path: str):
-    from mcap_ros2.reader import read_ros2_messages
+    from mcap.reader import make_reader
+    from rosbags.typesys import Stores, get_typestore
+    typestore = get_typestore(Stores.ROS2_HUMBLE)
 
     sync_ts  = []
     tf_data  = {p: [] for p in TF_CHAIN}
@@ -109,25 +111,30 @@ def extract_episode(mcap_path: str):
     grip_buf = []
     grip_ts  = []
 
-    for msg in read_ros2_messages(mcap_path, topics=["/sync_pulse", "/tf", "/gripper_width_normalized"]):
-        t     = msg.publish_time_ns / 1e9
-        topic = msg.channel.topic
+    with open(mcap_path, 'rb') as f:
+        reader = make_reader(f)
+        for _, channel, message in reader.iter_messages(
+                topics=["/sync_pulse", "/tf", "/gripper_width_normalized"]):
+            t     = message.publish_time / 1e9
+            topic = channel.topic
 
-        if topic == "/sync_pulse":
-            sync_ts.append(
-                msg.ros_msg.header.stamp.sec + msg.ros_msg.header.stamp.nanosec / 1e9
-            )
-        elif topic == "/tf":
-            for tf in msg.ros_msg.transforms:
-                pair = (tf.header.frame_id, tf.child_frame_id)
-                if pair in tf_data:
-                    tr = tf.transform.translation
-                    ro = tf.transform.rotation
-                    tf_data[pair].append(np.array([tr.x, tr.y, tr.z, ro.x, ro.y, ro.z, ro.w]))
-                    tf_ts[pair].append(t)
-        elif topic == "/gripper_width_normalized":
-            grip_buf.append(float(msg.ros_msg.data))
-            grip_ts.append(t)
+            if topic == "/sync_pulse":
+                sync_ts.append(t)
+
+            elif topic == "/tf":
+                msg = typestore.deserialize_cdr(message.data, 'tf2_msgs/msg/TFMessage')
+                for tf in msg.transforms:
+                    pair = (tf.header.frame_id, tf.child_frame_id)
+                    if pair in tf_data:
+                        tr, ro = tf.transform.translation, tf.transform.rotation
+                        tf_data[pair].append(
+                            np.array([tr.x, tr.y, tr.z, ro.x, ro.y, ro.z, ro.w]))
+                        tf_ts[pair].append(t)
+
+            elif topic == "/gripper_width_normalized":
+                msg = typestore.deserialize_cdr(message.data, 'std_msgs/msg/Float32')
+                grip_buf.append(float(msg.data))
+                grip_ts.append(t)
 
     if len(sync_ts) < 2:
         raise ValueError(f"Not enough sync pulses: {len(sync_ts)}")
@@ -168,7 +175,6 @@ def extract_episode(mcap_path: str):
 
     n_frames = min(len(ee_poses), len(grippers))
     return ee_poses[:n_frames], grippers[:n_frames], n_frames
-
 
 class OnlineIK(TrajectoryRetargeter):
 
@@ -214,11 +220,26 @@ class OnlineIK(TrajectoryRetargeter):
             gripper_hw,
         ], dtype=np.float32)
 
+def fk_to_umi_frame(ik: OnlineIK, q: np.ndarray) -> np.ndarray:
+    """
+    Compute gripper tip position in base_link, matching the UMI detection frame.
+    UMI detects the physical gripper tip = link_grasp_center + GRIPPER_OFFSET
+    along the EE X axis.
+    """
+    GRIPPER_OFFSET_M = 0.242  # from detect_umi.py
+    pos, rot = ik.forward_kinematics(q)
+    print(f"  [AXIS DBG] EE pos:    {pos}")
+    print(f"  [AXIS DBG] rot col 0 (+X): {rot[:, 0]}")  # currently used
+    print(f"  [AXIS DBG] rot col 1 (+Y): {rot[:, 1]}")
+    print(f"  [AXIS DBG] rot col 2 (+Z): {rot[:, 2]}")
+    print(f"  [AXIS DBG] training frame: x=0.745 y=0.083 z=0.927")
+    print(f"  [AXIS DBG] needed offset:  dx={0.745-pos[0]:.4f} dy={0.083-pos[1]:.4f} dz={0.927-pos[2]:.4f}")
+    # EE X axis in base_link frame is rot[:, 0]
+    gripper_tip = pos + rot[:, 0] * GRIPPER_OFFSET_M
+    return gripper_tip, rot
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("mcap", type=str, nargs="?", default=None)
-    parser.add_argument("--mode", choices=["replay", "inference"], default="replay")
     parser.add_argument("mcap", type=str, nargs="?", default=None)
     parser.add_argument("--mode", choices=["replay", "inference"], default="replay")
     parser.add_argument("--dry-run", action="store_true")
@@ -369,18 +390,26 @@ def main():
             else:
                 obs = pickle.loads(obs_sock.recv())  # block until obs arrives
                 jp  = state.get("joint_positions", [])
+                umi_pos, cur_rot = fk_to_umi_frame(ik, ik.q_current)
                 state_8d = np.concatenate([
-                    cur_pos,
+                    umi_pos,
                     Rotation.from_matrix(cur_rot).as_quat(),
                     [float(jp[5]) if len(jp) > 5 else 0.0]
                 ]).astype(np.float32)
                 fwd_sock.send(pickle.dumps({"rgb": obs["rgb"], "state": state_8d}), flags=zmq.NOBLOCK)
+                
+                #TODO: Debug
+                if step < 5:
+                    print(f"  [DBG state]  umi_pos=({umi_pos[0]:.4f}, {umi_pos[1]:.4f}, {umi_pos[2]:.4f}) gripper={state_8d[7]:.3f}")
 
                 action_8d           = pickle.loads(action_in.recv())
                 T_chunk_rel         = np.eye(4)
                 T_chunk_rel[:3, :3] = Rotation.from_quat(action_8d[3:7]).as_matrix()
                 T_chunk_rel[:3,  3] = action_8d[:3]
                 gripper_norm        = float(action_8d[7])
+                #TODO debug
+                if step < 5:
+                    print(f"  [DBG action] xyz=({action_8d[0]:.4f}, {action_8d[1]:.4f}, {action_8d[2]:.4f}) gripper={gripper_norm:.3f}")
 
             # ── PD2.1 + IK — identical for both modes ─────────────────────
             T_target    = T_t0_robot @ T_chunk_rel
@@ -392,7 +421,11 @@ def main():
             ik.q_current = q_new
 
             action_9d = ik.joints_to_action(q_new, gripper_norm, q_prev, dt)
-
+            #TODO
+            if step < 5:
+                print(f"  [DBG joints] lift={action_9d[3]:.4f} arm={action_9d[4]:.4f} yaw={action_9d[7]:.4f} pitch={action_9d[6]:.4f} roll={action_9d[5]:.4f}")
+                print(f"  [DBG target] pos=({target_pos[0]:.4f}, {target_pos[1]:.4f}, {target_pos[2]:.4f})")
+            
             pos_errors.append(pos_err)
             ori_errors.append(ori_err)
 
