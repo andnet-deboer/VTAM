@@ -96,6 +96,7 @@ class AprilTagMarker:
         self.length_mm = self.info.get('length_mm', 64.0)
         self.pos, self.axes = None, None
 
+    # 3x3 rotation matrix from cv2.Rodrigues(rvec) - this is the rotation that takes vectors from tag frame to camera frame.
     def update(self, corners, K, D):
         half = self.length_mm / 2.0
         pts = np.array([[-half, half, 0], [half, half, 0], [half, -half, 0], [-half, -half, 0]])
@@ -208,7 +209,8 @@ def process_episode(in_path, out_path, marker_info, args):
         quat_base /= np.linalg.norm(quat_base)
         prev_quat = quat_base.copy()
 
-        quat_final = (R_scipy.from_quat(quat_base) * R_scipy.from_euler('z', 90, degrees=True)).as_quat()
+        # Added correction need to verify
+        quat_final = (R_scipy.from_quat(quat_base) * R_scipy.from_euler('z', 90, degrees=True) * R_scipy.from_euler('y', -45, degrees=True)).as_quat()
         det_map[t_ns] = (pos_base, quat_final, pos_base + R_scipy.from_quat(quat_final).apply(GRIPPER_OFFSET))
 
     if len(det_map) > 10:
