@@ -26,8 +26,9 @@ from scipy.spatial.transform import Rotation
 from safetensors.torch import load_file
 
 SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
-UTILS_DIR    = os.path.join(SCRIPT_DIR, 'training', 'utils')
-LEROBOT_DIR  = os.path.join(SCRIPT_DIR, 'dependencies', 'lerobot')
+VTAM_ROOT    = os.path.abspath(os.path.join(SCRIPT_DIR, '..'))
+UTILS_DIR    = os.path.join(VTAM_ROOT, 'training', 'utils')
+LEROBOT_DIR  = os.path.join(VTAM_ROOT, 'dependencies', 'lerobot')
 sys.path.insert(0, UTILS_DIR)
 sys.path.insert(0, LEROBOT_DIR)
 

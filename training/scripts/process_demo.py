@@ -17,13 +17,17 @@ from safetensors.torch import save_file
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 import yaml
+from mcap.reader import make_reader
+from rosbags.typesys import Stores, get_typestore
+_typestore = get_typestore(Stores.ROS2_HUMBLE)
 
 # ── Path setup ─────────────────────────────────────────────────────────────────
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 VTAM_ROOT   = os.path.abspath(os.path.join(SCRIPT_DIR, '..', '..'))
 UTILS_DIR   = os.path.join(SCRIPT_DIR, '..', 'utils')
 LEROBOT_DIR = os.path.join(VTAM_ROOT, 'dependencies', 'lerobot')
-CONFIG_PATH = os.path.expanduser("~/VTAM/vtam_core/config/record.yaml")
+CONFIG_PATH = os.path.expanduser("~/VTAM/src/vtam_core/config/record.yaml")
+CHUNK_SIZE = 15
 
 sys.path.insert(0, UTILS_DIR)
 sys.path.insert(0, LEROBOT_DIR)
@@ -41,7 +45,7 @@ STATE_DIM     = 8   # [x, y, z, qx, qy, qz, qw, gripper] (RAW Robot Base Frame)
 TACTILE_DIM   = 30  # 15 Left + 15 Right
 
 TF_CHAIN = [("base_link", "umi_disconnect"), ("umi_disconnect", "umi_gripper")]
-ACTION_ORDER = ["x", "y", "z", "qx", "qy", "qz", "qw", "gripper"]  # absolute, transformed to chunk-relative at training time
+ACTION_ORDER = ["x", "y", "z", "qx", "qy", "qz", "qw", "gripper"]
 STATE_ORDER  = ["x", "y", "z", "qx", "qy", "qz", "qw", "gripper"]
 
 # ── TF & Topic helpers ────────────────────────────────────────────────────────
@@ -54,11 +58,10 @@ SESSION_TOPICS = load_topics(CONFIG_PATH)
 def find_topic(kw): return next((t for t in SESSION_TOPICS if kw in t), None)
 
 SYNC_TOPIC     = find_topic('sync_pulse')
-IMAGE_TOPIC    = find_topic('color/image_rect_raw')
+IMAGE_TOPIC    = find_topic('camera_arm/color/image_rect_raw')
 GRIPPER_TOPIC  = find_topic('gripper_width')
 TACTILE_LEFT   = find_topic('tactile_left')
 TACTILE_RIGHT  = find_topic('tactile_right')
-PROGRESS_TOPIC = "/progress"
 
 def tf_to_matrix(pose7):
     T = np.eye(4)
@@ -86,17 +89,25 @@ def process_episode(mcap_path, use_tactile=False):
     tf_data = {p: [] for p in TF_CHAIN}; tf_ts = {p: [] for p in TF_CHAIN}
     tl_buf, tl_ts, tr_buf, tr_ts = [], [], [], []
 
-    all_topics = [t for t in [SYNC_TOPIC, PROGRESS_TOPIC, "/tf", IMAGE_TOPIC, GRIPPER_TOPIC, TACTILE_LEFT, TACTILE_RIGHT] if t]
-    for msg in read_ros2_messages(mcap_path, topics=all_topics):
+    with open(mcap_path, 'rb') as f:
+        r = make_reader(f)
+        for _, channel, message in r.iter_messages():
+            if channel.topic == SYNC_TOPIC:
+                sync_ts.append(message.publish_time / 1e9)
+            elif channel.topic == '/tf':
+                t = message.publish_time / 1e9
+                tf_msg = _typestore.deserialize_cdr(message.data, 'tf2_msgs/msg/TFMessage')
+                for tf in tf_msg.transforms:
+                    pair = (tf.header.frame_id, tf.child_frame_id)
+                    if pair in tf_data:
+                        tr, ro = tf.transform.translation, tf.transform.rotation
+                        tf_data[pair].append(np.array([tr.x, tr.y, tr.z, ro.x, ro.y, ro.z, ro.w]))
+                        tf_ts[pair].append(t)
+
+    other_topics = [t for t in [IMAGE_TOPIC, GRIPPER_TOPIC, TACTILE_LEFT, TACTILE_RIGHT] if t]
+    for msg in read_ros2_messages(mcap_path, topics=other_topics):
         t, topic = msg.publish_time_ns / 1e9, msg.channel.topic
-        if topic == SYNC_TOPIC: sync_ts.append(msg.ros_msg.header.stamp.sec + msg.ros_msg.header.stamp.nanosec/1e9)
-        elif topic == "/tf":
-            for tf in msg.ros_msg.transforms:
-                pair = (tf.header.frame_id, tf.child_frame_id)
-                if pair in tf_data:
-                    tr, ro = tf.transform.translation, tf.transform.rotation
-                    tf_data[pair].append(np.array([tr.x, tr.y, tr.z, ro.x, ro.y, ro.z, ro.w])); tf_ts[pair].append(t)
-        elif topic == IMAGE_TOPIC:
+        if topic == IMAGE_TOPIC:
             img = cv2.cvtColor(cv2.imdecode(np.frombuffer(msg.ros_msg.data, np.uint8), 1), cv2.COLOR_BGR2RGB)
             h, w = img.shape[:2]; s = min(h, w); y, x = (h-s)//2, (w-s)//2
             img_buf.append(cv2.resize(img[y:y+s, x:x+s], IMAGE_SIZE).astype(np.uint8)); img_ts.append(t)
@@ -113,16 +124,27 @@ def process_episode(mcap_path, use_tactile=False):
 
     ee_raw, ee_t = extract_ee_pose(tf_data, tf_ts)
     ee_synced, imgs, grips = snap(ee_raw, ee_t), snap(img_buf, img_ts), snap(grip_buf, grip_ts)
-    
-    # PD2.1: store absolute EE poses as actions.
-    # chunk-relative transform inv(T_t0) @ T_ti applied in __getitem__ at training time.
-    actions_rel = [np.array(p, dtype=np.float32) for p in ee_synced]
 
-    N = len(sync_ts)
+    # Convert absolute poses to 4x4 matrices
+    ee_mats = [tf_to_matrix(p) for p in ee_synced]
+
+    # Compute relative poses per chunk
+    actions_rel = []
+    for i in range(len(ee_mats)):
+        chunk_start = (i // CHUNK_SIZE) * CHUNK_SIZE
+        T_t0_inv = np.linalg.inv(ee_mats[chunk_start])
+        T_rel = T_t0_inv @ ee_mats[i]
+        pos = T_rel[:3, 3]
+        quat = Rotation.from_matrix(T_rel[:3, :3]).as_quat()
+        actions_rel.append(np.concatenate([pos, quat]).astype(np.float32))
+
+    # State is also relative to chunk start
+    states_rel = actions_rel.copy()
+    
     ep = {
-        'images': imgs,
+        'images': [PILImage.fromarray(img) for img in imgs],
         'action': np.concatenate([np.array(actions_rel, np.float32), np.array(grips, np.float32)[:, None]], axis=1),
-        'state': np.concatenate([np.array(ee_synced, np.float32), np.array(grips, np.float32)[:, None]], axis=1),
+        'state': np.concatenate([np.array(states_rel, np.float32), np.array(grips, np.float32)[:, None]], axis=1),
         'T': N
     }
 
@@ -135,15 +157,17 @@ def process_episode(mcap_path, use_tactile=False):
 def main(args):
     import gc
     from datasets import concatenate_datasets, load_from_disk
-    
+
     lerobot_dir = Path(args.lerobot_dir); meta_dir = lerobot_dir/'meta_data'; train_dir = lerobot_dir/'train'
     if lerobot_dir.exists():
         if args.force: shutil.rmtree(lerobot_dir)
         else: print("Dir exists, use --force"); sys.exit(1)
 
-    mcap_paths = sorted(glob.glob(str(args.chunked_dir/'*.mcap')))
+    mcap_paths = sorted(glob.glob(str(args.processed_dir/'*.mcap')))
+
+    # Use datasets.Image()
     feat_dict = {
-        'observation.images.gripper': {'path': Value('string'), 'timestamp': Value('float64')},
+        'observation.images.gripper': Image(),
         'observation.state': Sequence(length=STATE_DIM, feature=Value('float32')),
         'action': Sequence(length=ACTION_DIM, feature=Value('float32')),
         'episode_index': Value('int64'), 'frame_index': Value('int64'),
@@ -160,20 +184,8 @@ def main(args):
         if ep is None: continue
         T = ep['T']; done = torch.zeros(T, dtype=torch.bool); done[-1] = True
 
-        # encode video before building ep_dict
-        imgs_dir = shard_dir / f'ep_{ep_idx:04d}_imgs'
-        imgs_dir.mkdir(parents=True, exist_ok=True)
-        for i in range(T):
-            PILImage.fromarray(ep['images'][i]).save(imgs_dir / f'frame_{i:06d}.png')
-        video_path = lerobot_dir / 'videos' / f'episode_{ep_idx:06d}.mp4'
-        encode_video_frames(imgs_dir, video_path, args.fps)
-        shutil.rmtree(imgs_dir)
-
         ep_dict = {
-            'observation.images.gripper': [
-                {"path": f"videos/episode_{ep_idx:06d}.mp4", "timestamp": t / args.fps}
-                for t in range(T)
-            ],
+            'observation.images.gripper': ep['images'],  # list of PIL Images
             'observation.state': torch.from_numpy(ep['state']),
             'action': torch.from_numpy(ep['action']),
             'episode_index': torch.tensor([ep_idx]*T), 'frame_index': torch.arange(T),
@@ -187,18 +199,47 @@ def main(args):
         gc.collect()
 
     hf_dataset = concatenate_datasets([load_from_disk(p) for p in shard_paths])
-    info = {'codebase_version': CODEBASE_VERSION, 'fps': args.fps, 'video': True, 'action_order': ACTION_ORDER, 'state_order': STATE_ORDER, 'image_size': {'gripper': list(IMAGE_SIZE)}, 'num_episodes': len(shard_paths), 'num_frames': cursor, 'task': args.task}
-    
-    # Final Stats & HF Save
+
+    # video=False: LeRobot will load images directly from the HF dataset, no decode step
+    info = {
+        'codebase_version': CODEBASE_VERSION,
+        'fps': args.fps,
+        'video': False,
+        'action_order': ACTION_ORDER,
+        'state_order': STATE_ORDER,
+        'image_size': {'gripper': list(IMAGE_SIZE)},
+        'num_episodes': len(shard_paths),
+        'num_frames': cursor,
+        'task': args.task
+    }
+
+    # Stats — action only (images don't need computed stats, ImageNet values injected below)
     chunk_size = 15
     delta_ts = {'action': [i / args.fps for i in range(chunk_size)]}
     episode_data_index_t = {k: torch.tensor(v) for k, v in episode_data_index.items()}
-    stats = compute_stats(LeRobotDataset.from_preloaded(repo_id=args.repo_id, hf_dataset=hf_dataset.with_transform(hf_transform_to_torch), episode_data_index=episode_data_index_t, info=info, videos_dir=lerobot_dir/'videos', delta_timestamps=delta_ts))
-    # CLEANUP: remove shards so we don't upload duplicate data
+    stats = compute_stats(LeRobotDataset.from_preloaded(
+        repo_id=args.repo_id,
+        hf_dataset=hf_dataset.with_transform(hf_transform_to_torch),
+        episode_data_index=episode_data_index_t,
+        info=info,
+        videos_dir=lerobot_dir/'videos',
+        delta_timestamps=delta_ts,
+    ))
+
+    # Inject ImageNet normalization stats for gripper image key.
+    # factory.py override_dataset_stats requires these keys to exist.
+    stats['observation.images.gripper'] = {
+        'mean': torch.tensor([[[0.485]], [[0.456]], [[0.406]]]),
+        'std':  torch.tensor([[[0.229]], [[0.224]], [[0.225]]]),
+        'min':  torch.tensor([[[0.0]],  [[0.0]],  [[0.0]]]),
+        'max':  torch.tensor([[[1.0]],  [[1.0]],  [[1.0]]]),
+    }
+
+    # CLEANUP shards
     if shard_dir.exists():
         shutil.rmtree(str(shard_dir))
-    
-    # Export directly to Parquet to bypass HF server-side conversion bugs
+
+    # Export to Parquet
     data_dir = lerobot_dir / 'data'
     data_dir.mkdir(parents=True, exist_ok=True)
     hf_dataset.to_parquet(str(data_dir / 'train-00000-of-00001.parquet'))
@@ -212,5 +253,17 @@ def main(args):
         api = HfApi(); api.upload_large_folder(folder_path=str(lerobot_dir), repo_id=args.repo_id, repo_type="dataset")
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(); parser.add_argument('demo_name', type=str); parser.add_argument('--fps', type=int, default=10); parser.add_argument('--force', action='store_true'); parser.add_argument('--push-to-hub', action='store_true'); parser.add_argument('--tactile', action='store_true'); parser.add_argument('--repo-id', type=str, default=None); args = parser.parse_args()
-    vtam_root = Path(__file__).resolve().parents[2]; args.task = args.demo_name; args.chunked_dir = vtam_root/'data'/'chunked'/args.demo_name; args.lerobot_dir = vtam_root/'data'/'lerobot'/args.demo_name; args.repo_id = args.repo_id or f"andnetdeboer/vtam_{args.demo_name}"; main(args)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('demo_name', type=str)
+    parser.add_argument('--fps', type=int, default=10)
+    parser.add_argument('--force', action='store_true')
+    parser.add_argument('--push-to-hub', action='store_true')
+    parser.add_argument('--tactile', action='store_true')
+    parser.add_argument('--repo-id', type=str, default=None)
+    args = parser.parse_args()
+    vtam_root = Path(__file__).resolve().parents[2]
+    args.task = args.demo_name
+    args.processed_dir = vtam_root/'data'/'processed'/args.demo_name
+    args.lerobot_dir = vtam_root/'data'/'lerobot'/args.demo_name
+    args.repo_id = args.repo_id or f"andnetdeboer/vtam_{args.demo_name}"
+    main(args)

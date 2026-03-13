@@ -8,7 +8,7 @@ Theory Reference: Lynch & Park, "Modern Robotics" Ch. 6 (Inverse Kinematics)
 
 Pipeline Context:
     This module is the second stage of a two-stage IK pipeline:
-        Stage 1 (Seed):  Analytical IK via kinematics.py on first N frames → median joint config
+        Stage 1 (Seed):  Analytical IK via kinematics.py on first N frames  median joint config
         Stage 2 (Track): Jacobian-based differential IK tracks frame-to-frame
 
     Input:  obs/ee_pose from synchronized .zarr  (N, 7) as [x, y, z, qx, qy, qz, qw]
@@ -228,16 +228,16 @@ class TrajectoryRetargeter:
         Anchors the trajectory so the first frame is exactly at the robot's neutral stance.
         Corrects for axis permutations between the demo sensor and ROS/Stretch conventions.
         """
-        # 1. Capture the starting point of the human demonstration
+        # Capture the starting point of the human demonstration
         anchor_pos = positions[0]
         R_anchor = Rotation.from_quat(quaternions[0])
         R_anchor_inv = R_anchor.inv()
         
-        # 2. Identify the Robot's physical 'Neutral' fingertip pose
+        # Identify the Robot's physical 'Neutral' fingertip pose
         neutral_pos, neutral_rot = self.forward_kinematics(self.neutral_q)
         R_neutral = Rotation.from_matrix(neutral_rot)
 
-        # 3. Calculate alignment rotation
+        # Calculate alignment rotation
         # Use 'zyx' (Yaw, Pitch, Roll) to safely extract yaw without axis bleeding
         yaw_demo = R_anchor.as_euler('zyx')[0]
         yaw_robot = R_neutral.as_euler('zyx')[0]
@@ -465,21 +465,21 @@ class TrajectoryRetargeter:
         print("\n=== RETARGETING DEBUG ===")
         print(f"Raw position[0]: {positions[0]}")
 
-        # 1. Get the Median Z height from the first few demo frames directly (No IK needed)
+        # Get the Median Z height from the first few demo frames directly (No IK needed)
         seed_count = min(self.seed_frames, len(positions))
         raw_median_z = np.median(positions[:seed_count, 2])
         
-        # 2. Set the neutral lift carriage height (adjusting for the 0.097m gripper offset)
+        # Set the neutral lift carriage height (adjusting for the 0.097m gripper offset)
         # This solves the "15cm jump" by anchoring to the demo's actual height
         neutral_q = self.neutral_q.copy()
         lift_idx = self.JOINT_NAMES.index('joint_lift')
         neutral_q[lift_idx] = np.clip(raw_median_z - 0.097, 0.0, 1.1)
         self.neutral_q = neutral_q
 
-        # 3. NOW project the trajectory (this shifts the path so the robot can reach it)
+        # Now project the trajectory into robots reach
         positions, quaternions, T_transform = self.project_to_workspace(positions, quaternions)
 
-        # 4. NOW compute the seed (this will work now because the frames are within reach)
+        # Compute the seed 
         q_seed = self.compute_seed(positions, quaternions)
         
         print(f"\nAfter workspace projection:")

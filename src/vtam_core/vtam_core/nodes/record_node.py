@@ -151,6 +151,9 @@ class RecordDemoNode(Node):
         msg.header.frame_id = "master_clock"
         self._sync_pub.publish(msg)
 
+    def _static_tf_cb(self, msg):
+        self._static_tf_cache = msg
+
     # ── Session bag ───────────────────────────────────────────────────────────
 
     def _start_session(self):
@@ -198,7 +201,7 @@ class RecordDemoNode(Node):
         self._episode_active = False
         self._episode_pub.publish(Bool(data=False))
         self._play_sound("stop")
-        self.get_logger().info("Episode STOPPED")
+        self.get_logger().info("STOPPING EPISODE")
 
     # ── Service callbacks ─────────────────────────────────────────────────────
 
@@ -207,7 +210,7 @@ class RecordDemoNode(Node):
             # Session running — stop it
             self._stop_session()
             response.success = True
-            response.message = f"Session stopped: {self._session_bag_path}"
+            response.message = f": {self._session_bag_path}"
             return response
 
         # No session — start one
@@ -231,11 +234,11 @@ class RecordDemoNode(Node):
         if not self._episode_active:
             self._start_episode()
             response.success = True
-            response.message = f"Episode started in: {self._session_bag_path}"
+            response.message = f"Episode STARTED in: {self._session_bag_path}"
         else:
             self._stop_episode()
             response.success = True
-            response.message = "Episode stopped."
+            response.message = "Episode STOPPED."
 
         self.get_logger().info(response.message)
         return response

@@ -101,7 +101,9 @@ def send_action(sock: zmq.Socket, targets_9d: np.ndarray, dry_run: bool = False)
 
 
 def extract_episode(mcap_path: str):
-    from mcap_ros2.reader import read_ros2_messages
+    from mcap.reader import make_reader
+    from rosbags.typesys import Stores, get_typestore
+    typestore = get_typestore(Stores.ROS2_HUMBLE)
 
     sync_ts  = []
     tf_data  = {p: [] for p in TF_CHAIN}
@@ -109,25 +111,30 @@ def extract_episode(mcap_path: str):
     grip_buf = []
     grip_ts  = []
 
-    for msg in read_ros2_messages(mcap_path, topics=["/sync_pulse", "/tf", "/gripper_width_normalized"]):
-        t     = msg.publish_time_ns / 1e9
-        topic = msg.channel.topic
+    with open(mcap_path, 'rb') as f:
+        reader = make_reader(f)
+        for _, channel, message in reader.iter_messages(
+                topics=["/sync_pulse", "/tf", "/gripper_width_normalized"]):
+            t     = message.publish_time / 1e9
+            topic = channel.topic
 
-        if topic == "/sync_pulse":
-            sync_ts.append(
-                msg.ros_msg.header.stamp.sec + msg.ros_msg.header.stamp.nanosec / 1e9
-            )
-        elif topic == "/tf":
-            for tf in msg.ros_msg.transforms:
-                pair = (tf.header.frame_id, tf.child_frame_id)
-                if pair in tf_data:
-                    tr = tf.transform.translation
-                    ro = tf.transform.rotation
-                    tf_data[pair].append(np.array([tr.x, tr.y, tr.z, ro.x, ro.y, ro.z, ro.w]))
-                    tf_ts[pair].append(t)
-        elif topic == "/gripper_width_normalized":
-            grip_buf.append(float(msg.ros_msg.data))
-            grip_ts.append(t)
+            if topic == "/sync_pulse":
+                sync_ts.append(t)
+
+            elif topic == "/tf":
+                msg = typestore.deserialize_cdr(message.data, 'tf2_msgs/msg/TFMessage')
+                for tf in msg.transforms:
+                    pair = (tf.header.frame_id, tf.child_frame_id)
+                    if pair in tf_data:
+                        tr, ro = tf.transform.translation, tf.transform.rotation
+                        tf_data[pair].append(
+                            np.array([tr.x, tr.y, tr.z, ro.x, ro.y, ro.z, ro.w]))
+                        tf_ts[pair].append(t)
+
+            elif topic == "/gripper_width_normalized":
+                msg = typestore.deserialize_cdr(message.data, 'std_msgs/msg/Float32')
+                grip_buf.append(float(msg.data))
+                grip_ts.append(t)
 
     if len(sync_ts) < 2:
         raise ValueError(f"Not enough sync pulses: {len(sync_ts)}")
@@ -168,7 +175,6 @@ def extract_episode(mcap_path: str):
 
     n_frames = min(len(ee_poses), len(grippers))
     return ee_poses[:n_frames], grippers[:n_frames], n_frames
-
 
 class OnlineIK(TrajectoryRetargeter):
 
@@ -214,11 +220,8 @@ class OnlineIK(TrajectoryRetargeter):
             gripper_hw,
         ], dtype=np.float32)
 
-
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("mcap", type=str, nargs="?", default=None)
-    parser.add_argument("--mode", choices=["replay", "inference"], default="replay")
     parser.add_argument("mcap", type=str, nargs="?", default=None)
     parser.add_argument("--mode", choices=["replay", "inference"], default="replay")
     parser.add_argument("--dry-run", action="store_true")
@@ -345,6 +348,8 @@ def main():
         if not args.dry_run:
             state = get_robot_state(ctx)
             ik.seed_from_robot_state(state, silent=True)
+        else:
+            state = {}  # <-- NEW: Dummy state for dry-run
 
         # Record robot EE at chunk start as anchor
         cur_pos, cur_rot    = ik.forward_kinematics(ik.q_current)
@@ -352,11 +357,13 @@ def main():
         T_t0_robot[:3, :3]  = cur_rot
         T_t0_robot[:3,  3]  = cur_pos
 
-        if args.mode == "replay":
+        if args.mode == "replay": 
             chunk_end   = min(chunk_start + CHUNK_SIZE, n_frames - 1)
             T_t0_ep_inv = np.linalg.inv(ep_mats[chunk_start])
             inner_range = range(chunk_start, chunk_end)
-        else:
+
+        else: # Inference mode
+            T_t0_robot_inv = np.linalg.inv(T_t0_robot)
             inner_range = range(CHUNK_SIZE)
 
         for i in inner_range:
@@ -368,19 +375,76 @@ def main():
                 gripper_norm = grippers[i + 1]
             else:
                 obs = pickle.loads(obs_sock.recv())  # block until obs arrives
-                jp  = state.get("joint_positions", [])
-                state_8d = np.concatenate([
-                    cur_pos,
-                    Rotation.from_matrix(cur_rot).as_quat(),
-                    [float(jp[5]) if len(jp) > 5 else 0.0]
-                ]).astype(np.float32)
-                fwd_sock.send(pickle.dumps({"rgb": obs["rgb"], "state": state_8d}), flags=zmq.NOBLOCK)
+                # jp  = state.get("joint_positions", [])
+                
+                # Get current absolute UMI pose
+                cur_pos_now, cur_rot_now = ik.forward_kinematics(ik.q_current)
+                T_curr = np.eye(4)
+                T_curr[:3,:3] = cur_rot_now
+                T_curr[:3,3] = cur_pos_now
+                T_rel = T_t0_robot_inv @ T_curr
+                #TODO rel_pos = T_rel[:3, 3]
+                rel_pos = T_rel[:3, 3]
+                rel_pos[0] = -rel_pos[0]
+                rel_quat = Rotation.from_matrix(T_rel[:3, :3]).as_quat()
 
+                # state_8d = np.concatenate([
+                #     rel_pos,
+                #     rel_quat,
+                #     [max(0.0, min(1.0, (1.05 - jp[5]) / 1.25)) if len(jp) > 5 else 0.0]
+                # ]).astype(np.float32)
+
+                live_joints = obs.get("joint", {})
+                current_gripper = live_joints.get("joint_gripper_finger_right", 1.1)
+
+                state_8d = np.concatenate([
+                    rel_pos,
+                    rel_quat,
+                    [max(0.0, min(1.0, (1.05 - current_gripper) / 1.25))]
+                ]).astype(np.float32)
+                
+                fwd_sock.send(pickle.dumps({"rgb": obs["rgb"], "state": state_8d}), flags=zmq.NOBLOCK)
+                
+                # --- Receive action from the server ---
                 action_8d           = pickle.loads(action_in.recv())
                 T_chunk_rel         = np.eye(4)
                 T_chunk_rel[:3, :3] = Rotation.from_quat(action_8d[3:7]).as_matrix()
                 T_chunk_rel[:3,  3] = action_8d[:3]
+                
                 gripper_norm        = float(action_8d[7])
+                
+                #TODO: Debug
+                # 1. Compute target first so action_9d exists for the print
+                T_target    = T_t0_robot @ T_chunk_rel
+                target_pos  = T_target[:3, 3]
+                target_quat = Rotation.from_matrix(T_target[:3, :3]).as_quat()
+
+                q_prev = ik.q_current.copy()
+                q_new, pos_err, ori_err = ik.step_ik(ik.q_current, target_pos, target_quat)
+                ik.q_current = q_new
+                action_9d = ik.joints_to_action(q_new, gripper_norm, q_prev, dt)
+
+                # 2. Enhanced Diagnostic Dashboard
+                if (step % CHUNK_SIZE) < 5:
+                    print(f"\n--- [FRAME {step}] COORDINATE ANALYSIS ---")
+                    # Model's output in UMI Frame (usually X is forward/out)
+                    print(f"POLICY DELTA:  x={action_8d[0]:.4f} (Model wants to move this far from anchor)")
+                    
+                    # Robot's physical state in UMI Frame
+                    print(f"ROBOT DELTA:   x={rel_pos[0]:.4f} (Robot thinks it has moved this far from anchor)")
+                    
+                    # The Physical Hardware result
+                    # action_9d[4] is the total arm extension in meters
+                    print(f"ARM COMMAND:   {action_9d[4]:.4f}m (Calculated extension for hardware)")
+
+                    # THE "SMOKING GUN" CHECK
+                    # If action_8d[0] is positive and ARM COMMAND is decreasing, your axis is flipped.
+                    if action_8d[0] > 0.005 and action_9d[4] < (q_prev[3] - 0.001):
+                         print("!!! AXIS FLIP DETECTED: Model wants to extend, but IK is retracting arm!")
+                    elif action_8d[0] < -0.005 and action_9d[4] > (q_prev[3] + 0.001):
+                         print("!!! AXIS FLIP DETECTED: Model wants to retract, but IK is extending arm!")
+                    
+                    print(f"-------------------------------------------\n")
 
             # ── PD2.1 + IK — identical for both modes ─────────────────────
             T_target    = T_t0_robot @ T_chunk_rel
@@ -392,7 +456,11 @@ def main():
             ik.q_current = q_new
 
             action_9d = ik.joints_to_action(q_new, gripper_norm, q_prev, dt)
-
+            #TODO
+            if step < 5:
+                print(f"  [DBG joints] lift={action_9d[3]:.4f} arm={action_9d[4]:.4f} yaw={action_9d[7]:.4f} pitch={action_9d[6]:.4f} roll={action_9d[5]:.4f}")
+                print(f"  [DBG target] pos=({target_pos[0]:.4f}, {target_pos[1]:.4f}, {target_pos[2]:.4f})")
+            
             pos_errors.append(pos_err)
             ori_errors.append(ori_err)
 
