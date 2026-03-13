@@ -2,8 +2,6 @@
 """
 replay_demo.py — Replay a recorded MCAP demonstration on the Stretch robot,
                  or run live policy inference (--mode inference).
-replay_demo.py — Replay a recorded MCAP demonstration on the Stretch robot,
-                 or run live policy inference (--mode inference).
 
 PURPOSE:
     Validate the full inference pipeline (TF extraction → IK → ZMQ execution)
@@ -12,13 +10,15 @@ PURPOSE:
 
 PIPELINE:
     1. Extract absolute EE poses from /tf in the MCAP
-    2. Compute T_rel[t] = inv(T_t) @ T_{t+1} for each frame pair
+    2. Express all poses relative to episode-start anchor: T_rel[t] = inv(T[0]) @ T[t]
     3. Each frame:
         a. Read actual robot joint state from ZMQ port 4403
         b. FK to get current EE pose in base_link
-        c. Apply T_rel in current EE local frame: T_target = T_current @ T_rel
-        d. IK solve to T_target → joint commands
-        e. Send to robot via ZMQ port 4402
+        c. Compute state as episode-start-relative: inv(T_anchor) @ T_current
+        d. Action (from MCAP or policy) is also episode-start-relative
+        e. Convert to absolute target: T_target = T_anchor @ T_action
+        f. IK solve to T_target → joint commands
+        g. Send to robot via ZMQ port 4402
 
 USAGE:
     python3 replay_demo.py place_coffee_cup/episode_000.mcap --dry-run
@@ -73,6 +73,13 @@ ZMQ_TIMEOUT_MS     = 3000
 
 def normalized_to_hardware(normalized: float) -> float:
     return GRIPPER_OPEN - (normalized * GRIPPER_TRAVEL)
+
+
+def tf_to_mat(p):
+    T = np.eye(4)
+    T[:3, :3] = Rotation.from_quat(p[3:]).as_matrix()
+    T[:3, 3]  = p[:3]
+    return T
 
 
 def get_robot_state(ctx: zmq.Context, timeout_ms: int = ZMQ_TIMEOUT_MS) -> dict:
@@ -142,12 +149,6 @@ def extract_episode(mcap_path: str):
     sync_arr  = np.array(sync_ts)
     ts_arrays = {p: np.array(tf_ts[p]) for p in TF_CHAIN}
 
-    def tf_to_matrix(pose7):
-        T = np.eye(4)
-        T[:3, :3] = Rotation.from_quat(pose7[3:]).as_matrix()
-        T[:3, 3]  = pose7[:3]
-        return T
-
     ee_poses = []
     for sync_t in sync_arr:
         T = np.eye(4)
@@ -158,7 +159,7 @@ def extract_episode(mcap_path: str):
                 valid = False
                 break
             idx = int(np.clip(np.searchsorted(arr, sync_t) - 1, 0, len(tf_data[pair]) - 1))
-            T = T @ tf_to_matrix(tf_data[pair][idx])
+            T = T @ tf_to_mat(tf_data[pair][idx])
         if not valid:
             continue
         pos  = T[:3, 3]
@@ -259,24 +260,12 @@ def main():
         print(f"EE pose[0]:    {ee_poses[0]}")
         print(f"Gripper range: min={min(grippers):.3f} max={max(grippers):.3f}\n")
 
-        print("Computing absolute EP matrices (PD2.1)...")
-        print("Computing absolute EP matrices (PD2.1)...")
-
-        def tf_to_mat(p):
-            T = np.eye(4)
-            T[:3, :3] = Rotation.from_quat(p[3:]).as_matrix()
-            T[:3, 3]  = p[:3]
-            return T
-        def tf_to_mat(p):
-            T = np.eye(4)
-            T[:3, :3] = Rotation.from_quat(p[3:]).as_matrix()
-            T[:3, 3]  = p[:3]
-            return T
-
+        print("Computing episode-start-relative poses...")
         ep_mats = [tf_to_mat(p) for p in ee_poses]
-        print(f"Loaded {len(ep_mats)} absolute poses, chunk_size={CHUNK_SIZE}\n")
-        ep_mats = [tf_to_mat(p) for p in ee_poses]
-        print(f"Loaded {len(ep_mats)} absolute poses, chunk_size={CHUNK_SIZE}\n")
+
+        # Episode-start anchor for replay data (matches process_demo.py)
+        T_ep_start_inv = np.linalg.inv(ep_mats[0])
+        print(f"Loaded {len(ep_mats)} absolute poses\n")
 
     else:
         print(f"\n{'='*60}")
@@ -326,6 +315,16 @@ def main():
         time.sleep(0.5)
         print("Sockets ready. Waiting for actions from sheep...\n")
 
+    # ── Anchor once before the main loop ──────────────────────────────────────
+    # This matches process_demo.py: everything is relative to the pose at the
+    # start of the episode/task attempt. No re-anchoring per chunk.
+    cur_pos, cur_rot = ik.forward_kinematics(ik.q_current)
+    T_t0_robot       = np.eye(4)
+    T_t0_robot[:3, :3] = cur_rot
+    T_t0_robot[:3, 3]  = cur_pos
+    T_t0_robot_inv     = np.linalg.inv(T_t0_robot)
+    print(f"Anchored at EE position: [{cur_pos[0]:.4f}, {cur_pos[1]:.4f}, {cur_pos[2]:.4f}]\n")
+
     # ── Main loop ─────────────────────────────────────────────────────────────
     pos_errors = []
     ori_errors = []
@@ -337,159 +336,105 @@ def main():
     if args.mode == "replay":
         print("Connected. Starting replay in 3 seconds...")
         time.sleep(3.0)
-        chunk_iter = range(0, n_frames - 1, CHUNK_SIZE)
+        total_frames = n_frames - 1
     else:
-        chunk_iter = iter(int, 1)  # infinite
+        total_frames = None  # infinite
 
     step = 0
-    for chunk_start in chunk_iter:
+    while True:
+        if args.mode == "replay" and step >= total_frames:
+            break
 
-        # PD2.1: re-seed once per chunk from real robot state
-        if not args.dry_run:
-            state = get_robot_state(ctx)
-            ik.seed_from_robot_state(state, silent=True)
+        t_start = time.time()
+
+        if args.mode == "replay":
+            # Replay: use episode-start-relative poses from MCAP
+            # T_ep_start_inv @ ep_mats[step+1] gives the episode-relative target
+            # Then T_t0_robot converts it to the robot's absolute frame
+            T_episode_rel    = T_ep_start_inv @ ep_mats[step + 1]
+            T_target         = T_t0_robot @ T_episode_rel
+            target_pos       = T_target[:3, 3]
+            target_quat      = Rotation.from_matrix(T_target[:3, :3]).as_quat()
+            gripper_norm     = grippers[step + 1]
+
         else:
-            state = {}  # <-- NEW: Dummy state for dry-run
+            # Inference: compute episode-start-relative state, send to policy,
+            # receive episode-start-relative action
+            obs = pickle.loads(obs_sock.recv())
 
-        # Record robot EE at chunk start as anchor
-        cur_pos, cur_rot    = ik.forward_kinematics(ik.q_current)
-        T_t0_robot          = np.eye(4)
-        T_t0_robot[:3, :3]  = cur_rot
-        T_t0_robot[:3,  3]  = cur_pos
+            # Current EE pose relative to episode-start anchor
+            cur_pos_now, cur_rot_now = ik.forward_kinematics(ik.q_current)
+            T_curr = np.eye(4)
+            T_curr[:3, :3] = cur_rot_now
+            T_curr[:3, 3]  = cur_pos_now
+            T_rel = T_t0_robot_inv @ T_curr
+            rel_pos  = T_rel[:3, 3]
+            rel_quat = Rotation.from_matrix(T_rel[:3, :3]).as_quat()
 
-        if args.mode == "replay": 
-            chunk_end   = min(chunk_start + CHUNK_SIZE, n_frames - 1)
-            T_t0_ep_inv = np.linalg.inv(ep_mats[chunk_start])
-            inner_range = range(chunk_start, chunk_end)
+            live_joints = obs.get("joint", {})
+            current_gripper = live_joints.get("joint_gripper_finger_right", 1.1)
 
-        else: # Inference mode
-            T_t0_robot_inv = np.linalg.inv(T_t0_robot)
-            inner_range = range(CHUNK_SIZE)
+            state_8d = np.concatenate([
+                rel_pos,
+                rel_quat,
+                [max(0.0, min(1.0, (1.05 - current_gripper) / 1.25))]
+            ]).astype(np.float32)
 
-        for i in inner_range:
-            t_start = time.time()
+            fwd_sock.send(pickle.dumps({"rgb": obs["rgb"], "state": state_8d}), flags=zmq.NOBLOCK)
 
-            # ── Only these lines differ between modes ──────────────────────
-            if args.mode == "replay":
-                T_chunk_rel  = T_t0_ep_inv @ ep_mats[i + 1]
-                gripper_norm = grippers[i + 1]
-            else:
-                obs = pickle.loads(obs_sock.recv())  # block until obs arrives
-                # jp  = state.get("joint_positions", [])
-                
-                # Get current absolute UMI pose
-                cur_pos_now, cur_rot_now = ik.forward_kinematics(ik.q_current)
-                T_curr = np.eye(4)
-                T_curr[:3,:3] = cur_rot_now
-                T_curr[:3,3] = cur_pos_now
-                T_rel = T_t0_robot_inv @ T_curr
-                #TODO rel_pos = T_rel[:3, 3]
-                rel_pos = T_rel[:3, 3]
-                rel_pos[0] = -rel_pos[0]
-                rel_quat = Rotation.from_matrix(T_rel[:3, :3]).as_quat()
+            # Receive episode-start-relative action from policy
+            action_8d        = pickle.loads(action_in.recv())
+            T_action_rel     = np.eye(4)
+            T_action_rel[:3, :3] = Rotation.from_quat(action_8d[3:7]).as_matrix()
+            T_action_rel[:3, 3]  = action_8d[:3]
+            gripper_norm     = float(action_8d[7])
 
-                # state_8d = np.concatenate([
-                #     rel_pos,
-                #     rel_quat,
-                #     [max(0.0, min(1.0, (1.05 - jp[5]) / 1.25)) if len(jp) > 5 else 0.0]
-                # ]).astype(np.float32)
-
-                live_joints = obs.get("joint", {})
-                current_gripper = live_joints.get("joint_gripper_finger_right", 1.1)
-
-                state_8d = np.concatenate([
-                    rel_pos,
-                    rel_quat,
-                    [max(0.0, min(1.0, (1.05 - current_gripper) / 1.25))]
-                ]).astype(np.float32)
-                
-                fwd_sock.send(pickle.dumps({"rgb": obs["rgb"], "state": state_8d}), flags=zmq.NOBLOCK)
-                
-                # --- Receive action from the server ---
-                action_8d           = pickle.loads(action_in.recv())
-                T_chunk_rel         = np.eye(4)
-                T_chunk_rel[:3, :3] = Rotation.from_quat(action_8d[3:7]).as_matrix()
-                T_chunk_rel[:3,  3] = action_8d[:3]
-                
-                gripper_norm        = float(action_8d[7])
-                
-                #TODO: Debug
-                # 1. Compute target first so action_9d exists for the print
-                T_target    = T_t0_robot @ T_chunk_rel
-                target_pos  = T_target[:3, 3]
-                target_quat = Rotation.from_matrix(T_target[:3, :3]).as_quat()
-
-                q_prev = ik.q_current.copy()
-                q_new, pos_err, ori_err = ik.step_ik(ik.q_current, target_pos, target_quat)
-                ik.q_current = q_new
-                action_9d = ik.joints_to_action(q_new, gripper_norm, q_prev, dt)
-
-                # 2. Enhanced Diagnostic Dashboard
-                if (step % CHUNK_SIZE) < 5:
-                    print(f"\n--- [FRAME {step}] COORDINATE ANALYSIS ---")
-                    # Model's output in UMI Frame (usually X is forward/out)
-                    print(f"POLICY DELTA:  x={action_8d[0]:.4f} (Model wants to move this far from anchor)")
-                    
-                    # Robot's physical state in UMI Frame
-                    print(f"ROBOT DELTA:   x={rel_pos[0]:.4f} (Robot thinks it has moved this far from anchor)")
-                    
-                    # The Physical Hardware result
-                    # action_9d[4] is the total arm extension in meters
-                    print(f"ARM COMMAND:   {action_9d[4]:.4f}m (Calculated extension for hardware)")
-
-                    # THE "SMOKING GUN" CHECK
-                    # If action_8d[0] is positive and ARM COMMAND is decreasing, your axis is flipped.
-                    if action_8d[0] > 0.005 and action_9d[4] < (q_prev[3] - 0.001):
-                         print("!!! AXIS FLIP DETECTED: Model wants to extend, but IK is retracting arm!")
-                    elif action_8d[0] < -0.005 and action_9d[4] > (q_prev[3] + 0.001):
-                         print("!!! AXIS FLIP DETECTED: Model wants to retract, but IK is extending arm!")
-                    
-                    print(f"-------------------------------------------\n")
-
-            # ── PD2.1 + IK — identical for both modes ─────────────────────
-            T_target    = T_t0_robot @ T_chunk_rel
+            # Convert to absolute target
+            T_target    = T_t0_robot @ T_action_rel
             target_pos  = T_target[:3, 3]
             target_quat = Rotation.from_matrix(T_target[:3, :3]).as_quat()
 
-            q_prev = ik.q_current.copy()
-            q_new, pos_err, ori_err = ik.step_ik(ik.q_current, target_pos, target_quat)
-            ik.q_current = q_new
+        # ── IK ─────────────────────────────────
+        q_prev = ik.q_current.copy()
+        q_new, pos_err, ori_err = ik.step_ik(ik.q_current, target_pos, target_quat)
+        ik.q_current = q_new
 
-            action_9d = ik.joints_to_action(q_new, gripper_norm, q_prev, dt)
-            #TODO
-            if step < 5:
-                print(f"  [DBG joints] lift={action_9d[3]:.4f} arm={action_9d[4]:.4f} yaw={action_9d[7]:.4f} pitch={action_9d[6]:.4f} roll={action_9d[5]:.4f}")
-                print(f"  [DBG target] pos=({target_pos[0]:.4f}, {target_pos[1]:.4f}, {target_pos[2]:.4f})")
-            
-            pos_errors.append(pos_err)
-            ori_errors.append(ori_err)
+        action_9d = ik.joints_to_action(q_new, gripper_norm, q_prev, dt)
 
-            status = "OK"
-            if pos_err > WARN_POS_ERROR_M:
-                status = f"WARN pos={pos_err*1000:.0f}mm"
-            elif ori_err > WARN_ORI_ERROR_RAD:
-                status = f"WARN ori={np.degrees(ori_err):.1f}deg"
+        if step < 5:
+            print(f"  [DBG joints] lift={action_9d[3]:.4f} arm={action_9d[4]:.4f} "
+                  f"yaw={action_9d[7]:.4f} pitch={action_9d[6]:.4f} roll={action_9d[5]:.4f}")
+            print(f"  [DBG target] pos=({target_pos[0]:.4f}, {target_pos[1]:.4f}, {target_pos[2]:.4f})")
 
-            print(
-                f"{step:<7} "
-                f"{pos_err*1000:<13.1f} "
-                f"{np.degrees(ori_err):<13.1f} "
-                f"{action_9d[3]:<8.3f} "
-                f"{action_9d[4]:<8.3f} "
-                f"{gripper_norm:<10.3f} "
-                f"{status}"
-            )
+        pos_errors.append(pos_err)
+        ori_errors.append(ori_err)
 
-            send_action(action_sock, action_9d, dry_run=args.dry_run)
+        status = "OK"
+        if pos_err > WARN_POS_ERROR_M:
+            status = f"WARN pos={pos_err*1000:.0f}mm"
+        elif ori_err > WARN_ORI_ERROR_RAD:
+            status = f"WARN ori={np.degrees(ori_err):.1f}deg"
 
-            elapsed = time.time() - t_start
-            sleep_t = dt - elapsed
-            if sleep_t > 0:
-                time.sleep(sleep_t)
-            elif elapsed > dt * 1.5:
-                print(f"  WARNING: Frame {step} took {elapsed*1000:.0f}ms (target {dt*1000:.0f}ms)")
+        print(
+            f"{step:<7} "
+            f"{pos_err*1000:<13.1f} "
+            f"{np.degrees(ori_err):<13.1f} "
+            f"{action_9d[3]:<8.3f} "
+            f"{action_9d[4]:<8.3f} "
+            f"{gripper_norm:<10.3f} "
+            f"{status}"
+        )
 
-            step += 1
+        send_action(action_sock, action_9d, dry_run=args.dry_run)
+
+        elapsed = time.time() - t_start
+        sleep_t = dt - elapsed
+        if sleep_t > 0:
+            time.sleep(sleep_t)
+        elif elapsed > dt * 1.5:
+            print(f"  WARNING: Frame {step} took {elapsed*1000:.0f}ms (target {dt*1000:.0f}ms)")
+
+        step += 1
 
     if args.mode == "replay":
         print("\n" + "=" * 60)

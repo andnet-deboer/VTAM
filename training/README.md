@@ -188,14 +188,34 @@ data/
 ```
 
 
-min_max maps [observed_min, observed_max] → [-1, 1]. It is defined by the extremes of your data. For absolute joint positions this works well — physical joint limits give you a natural, meaningful range that fills the entire [-1,1] space uniformly.
-For delta actions the distribution looks like this:
-most deltas cluster near 0
-│
-▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-     ─────────────────────
--max_delta              +max_delta
-The rare large motions at the extremes define min and max. After min_max normalization, 90% of your deltas are compressed into a tiny band around 0.0 in [-1,1] space. The model has to predict with very high precision in that tiny band — a small prediction error in normalized space corresponds to a large error in actual delta space.
-mean_std maps by subtracting the mean and dividing by std. Since deltas are zero-mean by construction (mean ≈ 0), the normalization just scales by spread. The common small deltas spread across a reasonable range of the normalized space, and the model can distinguish between them easily.
-The UMI paper (Chi et al., RSS 2023) uses this implicitly — their LinearNormalizer in the reference implementation defaults to limits mode for absolute actions and gaussian (mean_std) for delta/relative actions in their real robot configs. Check it directly:
+CUDA_VISIBLE_DEVICES=1 python3 dependencies/lerobot/lerobot/scripts/train.py \
+    policy=stretch_diffusion_vtam \
+    env=stretch_real_vtam \
+    dataset_repo_id=andnetdeboer/vtam_place_coffee_cup \
+    training.batch_size=64 \
+    training.num_workers=8 \
+    training.offline_steps=15000 \
+    training.save_freq=1000 \
+    training.image_transforms.enable=true \
+    wandb.enable=true
+
+
+cd ~/VTAM/dependencies/lerobot && CUDA_VISIBLE_DEVICES=1 python3 lerobot/scripts/train.py     policy=stretch_act_real_vtam_rel     env=stretch_real_vtam     dataset_repo_id=andnetdeboer/vtam_place_coffee_cup_rel     training.offline_steps=25000     training.batch_size=256     training.num_workers=16     training.image_transforms.enable=true     training.save_freq=1000     training.log_freq=50     wandb.enable=true
+
+
+3/11
+
+cd ~/VTAM/dependencies/lerobot && CUDA_VISIBLE_DEVICES=1 python3lerobot/scripts/train.py \
+    policy=stretch_act_real_vtam_rel \
+    env=stretch_real_vtam \
+    dataset_repo_id=andnetdeboer/vtam_setup_cup \
+    training.offline_steps=25000 \
+    training.batch_size=256 \
+    training.num_workers=16 \
+    training.image_transforms.enable=true \
+    training.save_freq=1000 \
+    training.log_freq=50 \
+    wandb.enable=true
+
+
 ---

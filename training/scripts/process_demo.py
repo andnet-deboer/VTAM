@@ -117,6 +117,8 @@ def process_episode(mcap_path, use_tactile=False):
 
     if len(sync_ts) < MIN_FRAMES or not tf_data[TF_CHAIN[0]]: return None
     sync_arr = np.array(sync_ts)
+    N = len(sync_arr)                          # FIX 1: N was undefined
+
     def snap(buf, ts):
         if not buf: return [np.zeros_like(buf[0]) if buf else 0] * len(sync_arr)
         idx = np.clip(np.searchsorted(np.array(ts), sync_arr)-1, 0, len(buf)-1)
@@ -128,19 +130,22 @@ def process_episode(mcap_path, use_tactile=False):
     # Convert absolute poses to 4x4 matrices
     ee_mats = [tf_to_matrix(p) for p in ee_synced]
 
-    # Compute relative poses per chunk
+    # FIX 2+3: Episode-start-relative for BOTH action and state.
+    # Single anchor at frame 0, consistent across the entire episode.
+    # LeRobot's delta_timestamps sliding window can now cross any frame
+    # boundary without hitting a coordinate-system discontinuity.
+    T_start_inv = np.linalg.inv(ee_mats[0])
+
     actions_rel = []
+    states_rel = []
     for i in range(len(ee_mats)):
-        chunk_start = (i // CHUNK_SIZE) * CHUNK_SIZE
-        T_t0_inv = np.linalg.inv(ee_mats[chunk_start])
-        T_rel = T_t0_inv @ ee_mats[i]
+        T_rel = T_start_inv @ ee_mats[i]
         pos = T_rel[:3, 3]
         quat = Rotation.from_matrix(T_rel[:3, :3]).as_quat()
-        actions_rel.append(np.concatenate([pos, quat]).astype(np.float32))
+        pose_rel = np.concatenate([pos, quat]).astype(np.float32)
+        actions_rel.append(pose_rel)
+        states_rel.append(pose_rel)
 
-    # State is also relative to chunk start
-    states_rel = actions_rel.copy()
-    
     ep = {
         'images': [PILImage.fromarray(img) for img in imgs],
         'action': np.concatenate([np.array(actions_rel, np.float32), np.array(grips, np.float32)[:, None]], axis=1),
