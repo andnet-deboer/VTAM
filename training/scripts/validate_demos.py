@@ -24,6 +24,9 @@ from pathlib import Path
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 VTAM_ROOT  = os.path.abspath(os.path.join(SCRIPT_DIR, '..', '..'))
 UTILS_DIR  = os.path.join(SCRIPT_DIR, '..', 'utils')
+QUAT_JUMP_THRESHOLD = 0.3  # dot product below this = large jump
+QUAT_JUMP_ERROR_FRACTION = 0.05  # >5% of frames with jumps = ERROR
+QUAT_JUMP_WARNING_FRACTION = 0.02  # >2% = WARNING
 
 sys.path.insert(0, UTILS_DIR)
 sys.path.insert(0, os.path.join(VTAM_ROOT, 'dependencies', 'lerobot'))
@@ -91,9 +94,51 @@ def read_episode(mcap_path, sync_topic, gripper_topic):
 
     return len(sync_ts), gripper, None
 
+def count_quat_jumps(mcap_path, sync_topic):
+    from mcap.reader import make_reader
+    from rosbags.typesys import Stores, get_typestore
+    from scipy.spatial.transform import Rotation as R
+    typestore = get_typestore(Stores.ROS2_HUMBLE)
+    
+    TF_CHAIN = [("base_link", "umi_disconnect"), ("umi_disconnect", "umi_gripper")]
+    tf_data = {p: [] for p in TF_CHAIN}
+    tf_ts = {p: [] for p in TF_CHAIN}
+    sync_ts = []
+
+    with open(mcap_path, 'rb') as f:
+        reader = make_reader(f)
+        for _, channel, message in reader.iter_messages(topics=['/tf', sync_topic]):
+            t = message.publish_time / 1e9
+            if channel.topic == sync_topic:
+                sync_ts.append(t)
+            elif channel.topic == '/tf':
+                msg = typestore.deserialize_cdr(message.data, 'tf2_msgs/msg/TFMessage')
+                for tf in msg.transforms:
+                    pair = (tf.header.frame_id, tf.child_frame_id)
+                    if pair in tf_data:
+                        ro = tf.transform.rotation
+                        tf_data[pair].append(np.array([ro.x, ro.y, ro.z, ro.w]))
+                        tf_ts[pair].append(t)
+
+    if not tf_data[TF_CHAIN[0]] or not sync_ts:
+        return 0, 0
+
+    # Snap to sync timestamps
+    sync_arr = np.array(sync_ts)
+    ts_arr = np.array(tf_ts[TF_CHAIN[0]])
+    idx = np.clip(np.searchsorted(ts_arr, sync_arr) - 1, 0, len(tf_data[TF_CHAIN[0]]) - 1)
+    quats = [tf_data[TF_CHAIN[0]][i] for i in idx]
+
+    jumps = 0
+    for i in range(1, len(quats)):
+        dot = abs(np.dot(quats[i], quats[i-1]))
+        if dot < QUAT_JUMP_THRESHOLD:
+            jumps += 1
+
+    return jumps, len(quats)
 
 def classify_episode(n_frames, gripper_values, length_mean, length_std,
-                     gripper_median_range, verbose=False):
+                     gripper_median_range, quat_jumps=0, quat_total=0, verbose=False):
     """
     Returns (status, reasons) where status is 'PASS', 'WARNING', or 'ERROR'
     and reasons is a list of human-readable strings.
@@ -136,7 +181,7 @@ def classify_episode(n_frames, gripper_values, length_mean, length_std,
                 f"min={min(gripper_values)*1000:.1f}mm "
                 f"max={max(gripper_values)*1000:.1f}mm"
             )
-
+        
         if gripper_median_range > 0:
             fraction = g_range / gripper_median_range
             if fraction < GRIPPER_ERROR_THRESHOLD:
@@ -152,7 +197,17 @@ def classify_episode(n_frames, gripper_values, length_mean, length_std,
                     f"Gripper barely moved: range={g_range*1000:.1f}mm "
                     f"({fraction*100:.1f}% of median {gripper_median_range*1000:.1f}mm)"
                 )
-
+        # ── Orientation jump checks ────────────────────────────────────────────────
+    if quat_total > 0:
+        fraction = quat_jumps / quat_total
+        if fraction > QUAT_JUMP_ERROR_FRACTION:
+            status = 'ERROR'
+            reasons.append(f"Too many orientation jumps: {quat_jumps}/{quat_total} ({fraction*100:.1f}%)")
+        elif fraction > QUAT_JUMP_WARNING_FRACTION:
+            if status != 'ERROR':
+                status = 'WARNING'
+            reasons.append(f"Orientation jumps: {quat_jumps}/{quat_total} ({fraction*100:.1f}%)")
+    
     return status, reasons
 
 
@@ -248,10 +303,12 @@ def main():
             status  = 'ERROR'
             reasons = [f"Read failed: {read_error}"]
         else:
+            jumps, total = count_quat_jumps(path, sync_topic)
             status, reasons = classify_episode(
                 n_frames, gripper,
                 length_mean, length_std,
                 gripper_median_range,
+                quat_jumps=jumps, quat_total=total,
                 verbose=args.verbose
             )
 

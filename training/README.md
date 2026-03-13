@@ -98,6 +98,12 @@ python3 ~/VTAM/training/scripts/process_demo.py \
     --repo-id andnetdeboer/vtam_place_coffee_cup_tactile \
     --push-to-hub
 
+python3 ~/VTAM/training/scripts/process_demo.py \
+    setup_cup \
+    --fps 10 \
+    --force \
+    --repo-id andnetdeboer/vtam_coffee \
+    --push-to-hub
     
 **What this does:**
 - Extracts UMI hand pose from `/tf` at each camera frame timestamp

@@ -140,7 +140,7 @@ def process_episode(mcap_path, use_tactile=False):
 
     # State is also relative to chunk start
     states_rel = actions_rel.copy()
-    N = len(sync_ts)  
+    
     ep = {
         'images': [PILImage.fromarray(img) for img in imgs],
         'action': np.concatenate([np.array(actions_rel, np.float32), np.array(grips, np.float32)[:, None]], axis=1),

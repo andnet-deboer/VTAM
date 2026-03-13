@@ -220,24 +220,6 @@ class OnlineIK(TrajectoryRetargeter):
             gripper_hw,
         ], dtype=np.float32)
 
-def fk_to_umi_frame(ik: OnlineIK, q: np.ndarray) -> np.ndarray:
-    """
-    Compute gripper tip position in base_link, matching the UMI detection frame.
-    UMI detects the physical gripper tip = link_grasp_center + GRIPPER_OFFSET
-    along the EE X axis.
-    """
-    GRIPPER_OFFSET_M = 0.242  # from detect_umi.py
-    pos, rot = ik.forward_kinematics(q)
-    print(f"  [AXIS DBG] EE pos:    {pos}")
-    print(f"  [AXIS DBG] rot col 0 (+X): {rot[:, 0]}")  # currently used
-    print(f"  [AXIS DBG] rot col 1 (+Y): {rot[:, 1]}")
-    print(f"  [AXIS DBG] rot col 2 (+Z): {rot[:, 2]}")
-    print(f"  [AXIS DBG] training frame: x=0.745 y=0.083 z=0.927")
-    print(f"  [AXIS DBG] needed offset:  dx={0.745-pos[0]:.4f} dy={0.083-pos[1]:.4f} dz={0.927-pos[2]:.4f}")
-    # EE X axis in base_link frame is rot[:, 0]
-    gripper_tip = pos + rot[:, 0] * GRIPPER_OFFSET_M
-    return gripper_tip, rot
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("mcap", type=str, nargs="?", default=None)
@@ -366,6 +348,8 @@ def main():
         if not args.dry_run:
             state = get_robot_state(ctx)
             ik.seed_from_robot_state(state, silent=True)
+        else:
+            state = {}  # <-- NEW: Dummy state for dry-run
 
         # Record robot EE at chunk start as anchor
         cur_pos, cur_rot    = ik.forward_kinematics(ik.q_current)
@@ -373,11 +357,13 @@ def main():
         T_t0_robot[:3, :3]  = cur_rot
         T_t0_robot[:3,  3]  = cur_pos
 
-        if args.mode == "replay":
+        if args.mode == "replay": 
             chunk_end   = min(chunk_start + CHUNK_SIZE, n_frames - 1)
             T_t0_ep_inv = np.linalg.inv(ep_mats[chunk_start])
             inner_range = range(chunk_start, chunk_end)
-        else:
+
+        else: # Inference mode
+            T_t0_robot_inv = np.linalg.inv(T_t0_robot)
             inner_range = range(CHUNK_SIZE)
 
         for i in inner_range:
@@ -389,27 +375,76 @@ def main():
                 gripper_norm = grippers[i + 1]
             else:
                 obs = pickle.loads(obs_sock.recv())  # block until obs arrives
-                jp  = state.get("joint_positions", [])
-                umi_pos, cur_rot = fk_to_umi_frame(ik, ik.q_current)
+                # jp  = state.get("joint_positions", [])
+                
+                # Get current absolute UMI pose
+                cur_pos_now, cur_rot_now = ik.forward_kinematics(ik.q_current)
+                T_curr = np.eye(4)
+                T_curr[:3,:3] = cur_rot_now
+                T_curr[:3,3] = cur_pos_now
+                T_rel = T_t0_robot_inv @ T_curr
+                #TODO rel_pos = T_rel[:3, 3]
+                rel_pos = T_rel[:3, 3]
+                rel_pos[0] = -rel_pos[0]
+                rel_quat = Rotation.from_matrix(T_rel[:3, :3]).as_quat()
+
+                # state_8d = np.concatenate([
+                #     rel_pos,
+                #     rel_quat,
+                #     [max(0.0, min(1.0, (1.05 - jp[5]) / 1.25)) if len(jp) > 5 else 0.0]
+                # ]).astype(np.float32)
+
+                live_joints = obs.get("joint", {})
+                current_gripper = live_joints.get("joint_gripper_finger_right", 1.1)
+
                 state_8d = np.concatenate([
-                    umi_pos,
-                    Rotation.from_matrix(cur_rot).as_quat(),
-                    [float(jp[5]) if len(jp) > 5 else 0.0]
+                    rel_pos,
+                    rel_quat,
+                    [max(0.0, min(1.0, (1.05 - current_gripper) / 1.25))]
                 ]).astype(np.float32)
+                
                 fwd_sock.send(pickle.dumps({"rgb": obs["rgb"], "state": state_8d}), flags=zmq.NOBLOCK)
                 
-                #TODO: Debug
-                if step < 5:
-                    print(f"  [DBG state]  umi_pos=({umi_pos[0]:.4f}, {umi_pos[1]:.4f}, {umi_pos[2]:.4f}) gripper={state_8d[7]:.3f}")
-
+                # --- Receive action from the server ---
                 action_8d           = pickle.loads(action_in.recv())
                 T_chunk_rel         = np.eye(4)
                 T_chunk_rel[:3, :3] = Rotation.from_quat(action_8d[3:7]).as_matrix()
                 T_chunk_rel[:3,  3] = action_8d[:3]
+                
                 gripper_norm        = float(action_8d[7])
-                #TODO debug
-                if step < 5:
-                    print(f"  [DBG action] xyz=({action_8d[0]:.4f}, {action_8d[1]:.4f}, {action_8d[2]:.4f}) gripper={gripper_norm:.3f}")
+                
+                #TODO: Debug
+                # 1. Compute target first so action_9d exists for the print
+                T_target    = T_t0_robot @ T_chunk_rel
+                target_pos  = T_target[:3, 3]
+                target_quat = Rotation.from_matrix(T_target[:3, :3]).as_quat()
+
+                q_prev = ik.q_current.copy()
+                q_new, pos_err, ori_err = ik.step_ik(ik.q_current, target_pos, target_quat)
+                ik.q_current = q_new
+                action_9d = ik.joints_to_action(q_new, gripper_norm, q_prev, dt)
+
+                # 2. Enhanced Diagnostic Dashboard
+                if (step % CHUNK_SIZE) < 5:
+                    print(f"\n--- [FRAME {step}] COORDINATE ANALYSIS ---")
+                    # Model's output in UMI Frame (usually X is forward/out)
+                    print(f"POLICY DELTA:  x={action_8d[0]:.4f} (Model wants to move this far from anchor)")
+                    
+                    # Robot's physical state in UMI Frame
+                    print(f"ROBOT DELTA:   x={rel_pos[0]:.4f} (Robot thinks it has moved this far from anchor)")
+                    
+                    # The Physical Hardware result
+                    # action_9d[4] is the total arm extension in meters
+                    print(f"ARM COMMAND:   {action_9d[4]:.4f}m (Calculated extension for hardware)")
+
+                    # THE "SMOKING GUN" CHECK
+                    # If action_8d[0] is positive and ARM COMMAND is decreasing, your axis is flipped.
+                    if action_8d[0] > 0.005 and action_9d[4] < (q_prev[3] - 0.001):
+                         print("!!! AXIS FLIP DETECTED: Model wants to extend, but IK is retracting arm!")
+                    elif action_8d[0] < -0.005 and action_9d[4] > (q_prev[3] + 0.001):
+                         print("!!! AXIS FLIP DETECTED: Model wants to retract, but IK is extending arm!")
+                    
+                    print(f"-------------------------------------------\n")
 
             # ── PD2.1 + IK — identical for both modes ─────────────────────
             T_target    = T_t0_robot @ T_chunk_rel
