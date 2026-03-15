@@ -22,6 +22,7 @@ import torch
 import cv2
 import zmq
 import yaml
+from collections import deque
 
 # ── Path setup ────────────────────────────────────────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -100,37 +101,58 @@ def main():
 
     step        = 0
     t_inference = []
+    TEMPORAL_ENSEMBLE_COEFF = 0.01  
+    chunk_queue = deque()
 
     try:
         while True:
-            # ── 1. Recv obs ───────────────────────────────────────────────
+            # Recv obs ───────────────────────────────────────────────
             try:
                 obs = pickle.loads(obs_sock.recv())
             except zmq.Again:
                 print("WARNING: timeout waiting for obs")
                 continue
 
-            # ── 2. Preprocess ─────────────────────────────────────────────
+            # Preprocess ─────────────────────────────────────────────
             batch = {
                 "observation.images.gripper": preprocess_rgb(obs["rgb"], args.device),
                 "observation.state":          preprocess_state(obs["state"], args.device),
             }
 
-            # ── 3. Run policy — returns (1, 8), queue managed internally ──
+            # Run policy and temporal ensembling ─────────────────────
             t0 = time.time()
             with torch.inference_mode():
-                action = policy.select_action(batch)
+                chunk = policy.model.forward(batch)  # Get full chunk, bypass internal queue
+            
+            chunk_np = chunk.cpu().numpy()[0]  # (chunk_size, 8)
+            
+            # Temporal ensemble: blend fresh chunk with residual queue
+            blended = np.zeros(8, dtype=np.float32)
+            total_weight = 0.0
+            
+            for i, queued_action in enumerate(chunk_queue):
+                w = np.exp(-TEMPORAL_ENSEMBLE_COEFF * i)
+                blended += w * queued_action
+                total_weight += w
+                
+            # Add fresh chunk's first action with weight 1
+            blended += 1.0 * chunk_np[0]
+            total_weight += 1.0
+            blended /= total_weight
+            
+            # Advance queue: drop oldest if full, push fresh chunk
+            chunk_queue = deque(chunk_np[1:])  
+            
             dt_inf = time.time() - t0
             t_inference.append(dt_inf)
 
-            # ── 4. Send (8,) to robot ─────────────────────────────────────
-            action_np = action.cpu().numpy()[0].astype(np.float32)  # (8,)
-            action_sock.send(pickle.dumps(action_np), flags=zmq.NOBLOCK)
+            # Send blended action to robot ───────────────────────────
+            action_sock.send(pickle.dumps(blended.astype(np.float32)), flags=zmq.NOBLOCK)
 
             if step % 10 == 0:
                 mean_inf = np.mean(t_inference[-20:]) * 1000
                 print(f"  step={step} inf={dt_inf*1000:.1f}ms "
-                      f"mean={mean_inf:.1f}ms action={action_np[:3]}")
+                      f"mean={mean_inf:.1f}ms action={blended_np[:3]}")
 
             step += 1
 

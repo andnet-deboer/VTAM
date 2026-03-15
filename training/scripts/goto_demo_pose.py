@@ -29,7 +29,7 @@ DEMO_POSE = np.array([
     0.0,    # base_x vel — no base motion
     0.0,    # base_y
     0.0,    # base_theta vel — no base motion
-    0.89,   # lift
+    0.86,   # lift
     0.08,   # arm extension
     0.0,    # wrist_roll
     -0.04,    # wrist_pitch — flat/horizontal
