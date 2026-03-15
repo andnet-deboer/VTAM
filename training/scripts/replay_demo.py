@@ -312,6 +312,14 @@ def main():
         action_in.setsockopt(zmq.SUBSCRIBE, b"")
         action_in.setsockopt(zmq.CONFLATE, 1)
         action_in.connect(f"tcp://{SHEEP_IP}:{ZMQ_CHUNK_PORT}")
+        
+        # Persistent state socket for real-time robot joint reading
+        state_sock = ctx.socket(zmq.SUB)
+        state_sock.setsockopt(zmq.SUBSCRIBE, b"")
+        state_sock.setsockopt(zmq.CONFLATE, 1)
+        state_sock.setsockopt(zmq.RCVTIMEO, ZMQ_TIMEOUT_MS)
+        state_sock.connect(f"tcp://{ROBOT_IP}:{ZMQ_STATE_PORT}")
+        
         time.sleep(0.5)
         print("Sockets ready. Waiting for actions from sheep...\n")
 
@@ -363,6 +371,8 @@ def main():
             obs = pickle.loads(obs_sock.recv())
 
             # Current EE pose relative to episode-start anchor
+            state_from_robot = pickle.loads(state_sock.recv())
+            ik.seed_from_robot_state(state_from_robot, silent=True)
             cur_pos_now, cur_rot_now = ik.forward_kinematics(ik.q_current)
             T_curr = np.eye(4)
             T_curr[:3, :3] = cur_rot_now
@@ -384,6 +394,11 @@ def main():
 
             # Receive episode-start-relative action from policy
             action_8d        = pickle.loads(action_in.recv())
+
+            print(f"[DIAG] step={step} state_pos={state_8d[:3]} state_grip={state_8d[7]:.3f}")
+            print(f"[DIAG] step={step} action_pos={action_8d[:3]} action_grip={action_8d[7]:.3f}")
+            print(f"[DIAG] step={step} real_grip={current_gripper:.3f} ik_q={ik.q_current[:4]}")
+
             T_action_rel     = np.eye(4)
             T_action_rel[:3, :3] = Rotation.from_quat(action_8d[3:7]).as_matrix()
             T_action_rel[:3, 3]  = action_8d[:3]
