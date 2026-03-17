@@ -59,7 +59,7 @@ def find_topic(kw): return next((t for t in SESSION_TOPICS if kw in t), None)
 
 SYNC_TOPIC     = find_topic('sync_pulse')
 IMAGE_TOPIC    = find_topic('camera_arm/color/image_rect_raw')
-GRIPPER_TOPIC  = find_topic('gripper_width')
+GRIPPER_TOPIC  = find_topic('gripper_width_normalized')
 TACTILE_LEFT   = find_topic('tactile_left')
 TACTILE_RIGHT  = find_topic('tactile_right')
 
@@ -84,7 +84,7 @@ def extract_ee_pose(tf_data, tf_ts):
     return ee_p, ee_t
 
 # ── Per-episode processing ─────────────────────────────────────────────────────
-def process_episode(mcap_path, use_tactile=False):
+def process_episode(mcap_path, fps, use_tactile=False):
     sync_ts, img_buf, img_ts, grip_buf, grip_ts = [], [], [], [], []
     tf_data = {p: [] for p in TF_CHAIN}; tf_ts = {p: [] for p in TF_CHAIN}
     tl_buf, tl_ts, tr_buf, tr_ts = [], [], [], []
@@ -117,10 +117,17 @@ def process_episode(mcap_path, use_tactile=False):
 
     if len(sync_ts) < MIN_FRAMES or not tf_data[TF_CHAIN[0]]: return None
     sync_arr = np.array(sync_ts)
-    N = len(sync_arr)                          # FIX 1: N was undefined
+
+    # Subsample sync timestamps to target fps
+    if len(sync_arr) > 1:
+        rec_hz = 1.0 / np.median(np.diff(sync_arr))
+        stride = max(1, round(rec_hz / fps))
+        sync_arr = sync_arr[::stride]
+
+    N = len(sync_arr)
 
     def snap(buf, ts):
-        if not buf: return [np.zeros_like(buf[0]) if buf else 0] * len(sync_arr)
+        if not buf: return [0] * len(sync_arr)
         idx = np.clip(np.searchsorted(np.array(ts), sync_arr)-1, 0, len(buf)-1)
         return [buf[i] for i in idx]
 
@@ -201,7 +208,7 @@ def main(args):
     episode_data_index = {'from': [], 'to': []}; shard_paths = []; cursor = 0
 
     for ep_idx, path in enumerate(tqdm(mcap_paths, desc='Processing')):
-        ep = process_episode(path, use_tactile=args.tactile)
+        ep = process_episode(path, fps=args.fps, use_tactile=args.tactile)
         if ep is None: continue
         T = ep['T']; done = torch.zeros(T, dtype=torch.bool); done[-1] = True
 

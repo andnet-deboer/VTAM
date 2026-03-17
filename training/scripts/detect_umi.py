@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-detect_umi.py — Stabilized Offline UMI Pose Detection
-Pipeline: data/chunked/ → detect_umi.py → data/processed/
+detect_umi.py — Offline UMI Pose Detection
+Pipeline: data/chunked/ - detect_umi.py - data/processed/
 """
 
 import argparse, glob, os, sys
+from collections import deque
 import cv2, cv2.aruco as aruco
 import numpy as np
 import yaml
@@ -17,7 +18,7 @@ from mcap.writer import Writer
 from mcap_ros2.reader import read_ros2_messages
 from rosbags.typesys import Stores, get_typestore
 
-# ── ROS type system ───────────────────────────────────────────────────────────
+# ROS type system 
 typestore   = get_typestore(Stores.ROS2_HUMBLE)
 Time        = typestore.types['builtin_interfaces/msg/Time']
 Header      = typestore.types['std_msgs/msg/Header']
@@ -27,7 +28,7 @@ Transform    = typestore.types['geometry_msgs/msg/Transform']
 TransformStamped = typestore.types['geometry_msgs/msg/TransformStamped']
 TFMessage    = typestore.types['tf2_msgs/msg/TFMessage']
 
-# ── Config ────────────────────────────────────────────────────────────────────
+# Config 
 MARKER_YAML    = os.path.expanduser("~/VTAM/src/vtam_core/config/teleop_april_marker_info_86mm.yaml")
 SYNC_TOPIC     = "/sync_pulse"
 IMAGE_TOPIC    = "/camera/color/image_raw/compressed"
@@ -35,7 +36,7 @@ CAM_INFO_TOPIC = "/camera/color/camera_info"
 TF_TOPIC       = "/tf"
 GRIPPER_OFFSET = np.array([0.242, 0.0, 0.0])
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# Helpers
 
 def smooth_trajectory_data(det_map, window=7):
     """Applies a weighted moving average to positions and quaternions to kill handover jitter."""
@@ -70,10 +71,9 @@ def make_tf_message(t_ns, parent, child, pos, quat):
         ))])
     return typestore.serialize_cdr(msg, 'tf2_msgs/msg/TFMessage')
 
-# ── Math & Filters ────────────────────────────────────────────────────────────
-
+# Math & Filters 
 class OneEuroFilter:
-    def __init__(self, freq, min_cutoff=0.01, beta=0.1): # Tuned for offline stability
+    def __init__(self, freq, min_cutoff=0.01, beta=0.1): 
         self.freq, self.min_cutoff, self.beta = freq, min_cutoff, beta
         self.x_prev = self.dx_prev = None
 
@@ -120,27 +120,39 @@ def avg_quaternions(quats, weights):
     Q = sum(w * np.outer(q, q) for q, w in zip(aligned, weights))
     return np.linalg.eigh(Q)[1][:, -1]
 
-# ── Static Kinematics ────────────────────────────────────────────────────────
+# TF Chain from Bag 
 
-def static_base_to_head():
-    t1 = np.array([-0.067878, 0.133880, 0.026018])
-    r1 = R_scipy.from_euler('xyz', [1.579757, -0.004523, -0.002246])
-    t2, r2 = np.array([0.0, 1.33, 0.0]), R_scipy.from_euler('xyz', [1.57079, -1.57079, 3.1416])
-    return t1 + r1.apply(t2), r1 * r2
+def load_static_tfs(path):
+    """Load all /tf_static transforms from the bag."""
+    static_tfs = {}
+    for msg in read_ros2_messages(path, topics=['/tf_static']):
+        for tf in msg.ros_msg.transforms:
+            t = np.array([tf.transform.translation.x, tf.transform.translation.y, tf.transform.translation.z])
+            r = R_scipy.from_quat([tf.transform.rotation.x, tf.transform.rotation.y,
+                                   tf.transform.rotation.z, tf.transform.rotation.w])
+            static_tfs[(tf.header.frame_id, tf.child_frame_id)] = (t, r)
+    return static_tfs
 
-def static_head_tilt_to_cam():
-    t1, r1 = np.array([0.0259, -0.0095, 0.0174]), R_scipy.from_euler('xyz', [0.0045, -0.0028, 0.0168])
-    t2, r2 = np.array([0.0106, 0.0175, 0.0125]), R_scipy.identity()
-    t3, r3 = np.array([0.0, 0.015, 0.0]), R_scipy.identity()
-    r4 = R_scipy.from_euler('xyz', [-np.pi/2, 0, -np.pi/2])
-    r123 = r1 * r2 * r3
-    return t1 + r1.apply(t2) + (r1*r2).apply(t3), r123 * r4
+def chain_static_tf(static_tfs, from_frame, to_frame):
+    """BFS through static TF tree to compute transform from from_frame to to_frame."""
+    queue = deque([(from_frame, np.zeros(3), R_scipy.identity())])
+    visited = {from_frame}
+    while queue:
+        frame, t_acc, r_acc = queue.popleft()
+        if frame == to_frame:
+            return t_acc, r_acc
+        for (parent, child), (t, r) in static_tfs.items():
+            if parent == frame and child not in visited:
+                visited.add(child)
+                queue.append((child, t_acc + r_acc.apply(t), r_acc * r))
+    return None, None
 
-# ── Core Processing ───────────────────────────────────────────────────────────
+# Core Processing 
 
 def process_episode(in_path, out_path, marker_info, args):
     K, D, sync_ns, imgs = None, None, [], []
     tf_pan_raw, tf_pan_ts, tf_tilt_raw, tf_tilt_ts = [], [], [], []
+    pan_parent_frame, cam_frame = None, None
 
     with open(in_path, 'rb') as f:
         r = make_reader(f)
@@ -151,6 +163,7 @@ def process_episode(in_path, out_path, marker_info, args):
         t, topic = msg.publish_time_ns, msg.channel.topic
         if topic == CAM_INFO_TOPIC and K is None:
             K, D = np.array(msg.ros_msg.k).reshape(3, 3), np.array(msg.ros_msg.d)
+            cam_frame = msg.ros_msg.header.frame_id
         elif topic == IMAGE_TOPIC:
             imgs.append((msg.ros_msg.data, t, t / 1e9))
         elif topic == TF_TOPIC:
@@ -159,14 +172,21 @@ def process_episode(in_path, out_path, marker_info, args):
                        tf.transform.rotation.x, tf.transform.rotation.y, tf.transform.rotation.z, tf.transform.rotation.w]
                 if tf.child_frame_id == 'link_head_pan':
                     tf_pan_raw.append(val); tf_pan_ts.append(t / 1e9)
+                    if pan_parent_frame is None:
+                        pan_parent_frame = tf.header.frame_id
                 elif tf.child_frame_id == 'link_head_tilt':
                     tf_tilt_raw.append(val); tf_tilt_ts.append(t / 1e9)
     if K is None or len(sync_ns) < 10: return False
-    
+
     pan_data, pan_ts = np.array(tf_pan_raw), np.array(tf_pan_ts)
     tilt_data, tilt_ts = np.array(tf_tilt_raw), np.array(tf_tilt_ts)
-    t_bh, R_bh = static_base_to_head()
-    t_tc, R_tc = static_head_tilt_to_cam()
+
+    # Build TF chain from bag's /tf_static
+    static_tfs = load_static_tfs(in_path)
+    t_bh, R_bh = chain_static_tf(static_tfs, 'base_link', pan_parent_frame)
+    t_tc, R_tc = chain_static_tf(static_tfs, 'link_head_tilt', cam_frame)
+    if t_bh is None or t_tc is None:
+        raise RuntimeError(f"Static TF chain lookup failed (pan_parent={pan_parent_frame}, cam={cam_frame}) — is /tf_static recorded in the bag?")
 
     detector = aruco.ArucoDetector(aruco.getPredefinedDictionary(aruco.DICT_APRILTAG_36h11), aruco.DetectorParameters())
     detector.getDetectorParameters().cornerRefinementMethod = aruco.CORNER_REFINE_SUBPIX

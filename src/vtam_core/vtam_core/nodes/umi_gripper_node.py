@@ -92,6 +92,14 @@ class GripperController(hm.HelloNode):
             out = Float32()
             out.data = float(self.current_gripper_pos)
             self.pub_width.publish(out)
+
+            total_travel = self.gripper_open - self.gripper_closed
+            actual_normalized = float(np.clip(
+                (self.current_gripper_pos - self.gripper_closed) / total_travel, 0.0, 1.0
+            ))
+            out_norm = Float32()
+            out_norm.data = actual_normalized
+            self.pub_normalized.publish(out_norm)
         except ValueError:
             pass
 
@@ -147,10 +155,6 @@ class GripperController(hm.HelloNode):
         if abs(target - self.gripper_position) > 0.01:
             self.gripper_position = target
             self.move_to_pose({'joint_gripper_finger_left': target}, blocking=False)
-
-        out = Float32()
-        out.data = float(normalized)
-        self.pub_normalized.publish(out)
 
     # -- Calibration --
 

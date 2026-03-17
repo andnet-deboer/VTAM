@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-replay_demo.py — Replay a recorded MCAP demonstration on the Stretch robot,
+run_inference.py — Replay a recorded MCAP demonstration on the Stretch robot,
                  or run live policy inference (--mode inference).
 
 PURPOSE:
@@ -43,7 +43,7 @@ from scipy.spatial.transform import Rotation
 
 # ── Path setup ────────────────────────────────────────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-VTAM_ROOT  = os.path.abspath(os.path.join(SCRIPT_DIR, '..', '..'))
+VTAM_ROOT  = os.path.abspath(os.path.join(SCRIPT_DIR, '..'))
 UTILS_DIR  = os.path.join(VTAM_ROOT, 'training', 'utils')
 
 sys.path.insert(0, VTAM_ROOT)
@@ -61,9 +61,9 @@ ZMQ_CHUNK_PORT     = 4405   # recv action from sheep         (inference only)
 DEFAULT_FPS        = 10
 CHUNK_SIZE         = 15
 
-GRIPPER_OPEN       = 1.1
-GRIPPER_CLOSED     = -0.5
-GRIPPER_TRAVEL     = GRIPPER_OPEN - GRIPPER_CLOSED  # 1.6
+GRIPPER_OPEN       = 1.05
+GRIPPER_CLOSED     = -0.2
+GRIPPER_TRAVEL     = GRIPPER_OPEN - GRIPPER_CLOSED  # 1.25
 
 TF_CHAIN = [("base_link", "umi_disconnect"), ("umi_disconnect", "umi_gripper")]
 
@@ -76,7 +76,8 @@ DIAG_DIR = "/tmp/vtam_diag"
 
 
 def normalized_to_hardware(normalized: float) -> float:
-    return GRIPPER_OPEN - (normalized * GRIPPER_TRAVEL)
+    # normalized: 0.0 = closed, 1.0 = open  (matches training convention)
+    return GRIPPER_CLOSED + (normalized * GRIPPER_TRAVEL)
 
 
 def tf_to_mat(p):
@@ -401,17 +402,15 @@ def main():
             state_8d = np.concatenate([
                 rel_pos,
                 rel_quat,
-                [max(0.0, min(1.0, (1.05 - current_gripper) / 1.25))]
-            ]).astype(np.
-            float32)
+                [np.clip((current_gripper - GRIPPER_CLOSED) / GRIPPER_TRAVEL, 0.0, 1.0)],
+            ]).astype(np.float32)
             if step == 0:
                 print(f"  [STATE-8D] full state: {state_8d}")
                 print(f"  [STATE-8D] quat: [{state_8d[3]:.4f}, {state_8d[4]:.4f}, {state_8d[5]:.4f}, {state_8d[6]:.4f}]")
             if step in [14, 15, 29, 30]:
                 print(f"  [STATE-SENT step={step}] state_8d[:3]={state_8d[:3]}")
 
-            #TODO fwd_sock.send(pickle.dumps({"rgb": obs["rgb"], "state": state_8d}), flags=zmq.NOBLOCK)
-            fwd_sock.send(pickle.dumps({"rgb": obs["rgb"], "state": state_8d, "robot_step": step}), flags=zmq.NOBLOCK)
+            fwd_sock.send(pickle.dumps({"rgb": obs["rgb"], "state": state_8d}), flags=zmq.NOBLOCK)
 
             # Receive action from sheep
             action_8d = pickle.loads(action_in.recv())

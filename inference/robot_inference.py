@@ -16,16 +16,12 @@ JOINT_NAMES = [
     'joint_gripper_finger_left'
 ]
 
-# Consumed by replay_demo.py seed_from_robot_state()
-# Indices: 0=base_x, 1=base_y, 2=base_theta, 3=lift, 4=arm_l0,
-#          5=gripper_finger_right, 6=wrist_roll, 7=wrist_pitch, 8=wrist_yaw
 ORDERED_JOINTS = [
     'base_x', 'base_y', 'base_theta',
     'joint_lift', 'joint_arm_l0',
     'joint_gripper_finger_right', 'joint_wrist_roll',
     'joint_wrist_pitch', 'joint_wrist_yaw'
 ]
-
 
 class VTAMRobotNode(Node):
     def __init__(self):

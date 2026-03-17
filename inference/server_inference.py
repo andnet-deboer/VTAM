@@ -129,35 +129,18 @@ def main():
             # Run policy — returns (1, 8), queue managed internally ──
             t0 = time.time()
             with torch.inference_mode():
-<<<<<<< HEAD:inference/vtam_server_inference.py
                 action = policy.select_action(batch)
-=======
-                if step % 15 == 0:
-                    print(f"  [SYNC] sheep_step={step} robot_step={obs.get('robot_step','?')} state={obs['state'][:3]}")
-                if step in [14, 15, 29, 30]:
-                    state_np = obs["state"]
-                    print(f"  [INPUT step={step}] state sent to model: {state_np[:3]}")
-
-                action = policy.select_action(batch)
-
-
->>>>>>> main:inference/server_inference.py
             dt_inf = time.time() - t0
             t_inference.append(dt_inf)
 
             # Send (8,) to robot ─────────────────────────────────────
             action_np = action.cpu().numpy()[0].astype(np.float32)  # (8,)
-<<<<<<< HEAD:inference/vtam_server_inference.py
             action_sock.send(pickle.dumps(action_np), flags=zmq.NOBLOCK)
 
             if step % 10 == 0:
                 mean_inf = np.mean(t_inference[-20:]) * 1000
                 print(f"  step={step} inf={dt_inf*1000:.1f}ms "
                       f"mean={mean_inf:.1f}ms action={action_np[:3]}")
-=======
-
-            action_sock.send(pickle.dumps(action_np), flags=zmq.NOBLOCK)
->>>>>>> main:inference/server_inference.py
 
             step += 1
 

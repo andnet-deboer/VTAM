@@ -1,28 +1,46 @@
 # VTAM Inference
 
-Two-process pipeline: the robot streams observations over ZMQ; the GPU machine runs the policy and sends back actions.
+Three-process pipeline across two machines.
 
 ## Architecture
 
 | Robot | GPU Machine |
 |-------|-------------|
-| `vtam_robot_node.py` | `vtam_server_inference.py` |
-| `/gripper_camera`  obs (4401)  | `ACTPolicy.select_action()` |
-| `/joint_states`  state (4403)  | 8D EE pose |
-|  actions (4402)  |  joint cmds |
+| `robot_inference.py` | `server_inference.py` |
+| `run.py --mode inference` | `ACTPolicy.select_action()` |
+| ROS2: `/gripper_camera`, `/joint_states`, `/odom` | |
+| obs out 4401, state out 4403, actions in 4402 | obs in 4406, actions out 4405 |
+
+| Port | From | To | Contents |
+|------|------|----|----------|
+| 4401 | robot_inference.py | run.py | rgb jpeg + joint dict |
+| 4403 | robot_inference.py | run.py | 9D joint positions |
+| 4406 | run.py | server_inference.py | rgb jpeg + 8D state |
+| 4405 | server_inference.py | run.py | 8D delta action |
+| 4402 | run.py | robot_inference.py | 9D joint targets |
 
 Ports and IPs are configured in `../config/inference.yaml`.
 
 ## Running
 
-### Robot 
+Start all three processes:
 
+### 1. Robot
 ```bash
 python3 robot_inference.py
 ```
 
-### GPU Machine
+### 2. Robot (or laptop on same network)
+```bash
+# Live policy inference
+python3 run.py --mode inference
 
+# Replay a recorded demo (validate IK before deploying a policy)
+python3 run.py data/processed/<task>/episode_000.mcap --dry-run
+python3 run.py data/processed/<task>/episode_000.mcap
+```
+
+### 3. GPU Machine
 ```bash
 python3 server_inference.py
 # or override the policy path from config:
