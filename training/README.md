@@ -1,14 +1,14 @@
 # VTAM Training Pipeline
 
-End-to-end pipeline: robot recording → dataset → policy.
+End-to-end pipeline: robot recording to dataset to policy.
 
 ```
 data/raw/<task>/session_<timestamp>.mcap
-    └─ bag_chunker.py
+    bag_chunker.py
 data/chunked/<task>/episode_000.mcap  episode_001.mcap  ...
-    └─ process_demo.py  (reads from data/processed/<task>/)
+    process_demo.py  (reads from data/processed/<task>/)
 data/lerobot/<task>/                        (HuggingFace dataset)
-    └─ lerobot/scripts/train.py
+    lerobot/scripts/train.py
 dependencies/lerobot/outputs/train/*/checkpoints/
 ```
 
@@ -65,10 +65,10 @@ python3 training/scripts/process_demo.py <task> \
 
 What this does:
 - Extracts UMI hand pose from `/tf` at each camera frame timestamp
-- Calls `workspace_projection.project()` → canonical EE pose (N, 7)
-- Extracts `/gripper_width_normalized` → (N,)
-- Extracts `/camera_arm` images → (N, 320, 320, 3)
-- Computes progress token (0→1) per episode
+- Calls `workspace_projection.project()` to get canonical EE pose (N, 7)
+- Extracts `/gripper_width_normalized` (N,)
+- Extracts `/camera_arm` images (N, 320, 320, 3)
+- Computes progress token (0 to 1) per episode
 - Packages as HuggingFace dataset with `action = [x, y, z, qx, qy, qz, qw, gripper]` (8D)
 
 ---
@@ -99,7 +99,7 @@ CUDA_VISIBLE_DEVICES=1 python3 lerobot/scripts/train.py \
 | `qx, qy, qz, qw` | 4 | EE orientation as XYZW quaternion |
 | `gripper` | 1 | Normalised gripper width [0, 1] |
 
-Actions are **relative deltas (Δq)** — invariant to robot starting configuration. Progress token `[0.0 → 1.0]` is an observation only.
+Actions are relative deltas, invariant to robot starting configuration. Progress token [0.0 to 1.0] is an observation only.
 
 ---
 
@@ -107,9 +107,9 @@ Actions are **relative deltas (Δq)** — invariant to robot starting configurat
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/bag_chunker.py` | Split session bag → episode bags on `/recording/active` markers |
-| `scripts/process_demo.py` | Episode bags → HuggingFace LeRobot dataset |
-| `scripts/replay_demo.py` | Replay a recorded trajectory on the robot |
+| `scripts/bag_chunker.py` | Split session bag into episode bags on `/recording/active` markers |
+| `scripts/process_demo.py` | Episode bags to HuggingFace LeRobot dataset |
+| `inference/run.py` | Replay a recorded trajectory or run live policy inference on the robot |
 | `scripts/validate_demos.py` | Validate episode integrity |
 | `scripts/detect_umi.py` | UMI hand detection utility |
 | `scripts/fuse_imu.py` | IMU sensor fusion |
@@ -121,6 +121,6 @@ Actions are **relative deltas (Δq)** — invariant to robot starting configurat
 |--------|---------|
 | `utils/differential_ik.py` | Jacobian-based 6-DOF IK (damped least-squares); used at inference |
 | `utils/kinematics.py` | Analytical IK for trajectory seeding |
-| `utils/workspace_projection.py` | UMI frame → robot canonical frame transform |
+| `utils/workspace_projection.py` | UMI frame to robot canonical frame transform |
 | `utils/visualize_ik.py` | Visualise IK results |
 | `utils/stretch_omni_mobile_ik.urdf` | 7-DOF URDF for pinocchio |

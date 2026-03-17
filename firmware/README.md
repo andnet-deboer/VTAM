@@ -17,8 +17,8 @@ This firmware adds a **recording trigger button on pin A3** (active-low, interna
 
 ## Arduino Setup
 
-1. Install the **Adafruit_LSM6DS** library via Arduino IDE → Sketch → Include Library → Manage Libraries
-2. Install the local `arduino-MLX90393` library (Sketch → Include Library → Add .ZIP Library)
+1. Install the **Adafruit_LSM6DS** library via Arduino IDE > Sketch > Include Library > Manage Libraries
+2. Install the local `arduino-MLX90393` library (Sketch > Include Library > Add .ZIP Library)
 3. Flash `5x_eflesh_stream.ino` to the QT Py board
 
 ## ROS2 IMU Tools (optional)

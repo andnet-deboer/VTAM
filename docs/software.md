@@ -119,11 +119,11 @@ python3 inference/vtam_server_inference.py \
 |--------|---------|
 | `training/utils/differential_ik.py` | Jacobian-based 6-DOF IK (damped least-squares); used at inference |
 | `training/utils/kinematics.py` | Analytical IK for trajectory seeding |
-| `training/utils/workspace_projection.py` | UMI frame → robot canonical frame transform |
-| `training/scripts/process_demo.py` | MCAP → HuggingFace LeRobot dataset |
-| `training/scripts/bag_chunker.py` | Session bag → per-episode bags |
-| `inference/vtam_server_inference.py` | ZMQ server; runs ACTPolicy on GPU |
-| `inference/vtam_robot_node.py` | Robot-side ZMQ bridge; ROS2 sensors → obs, actions → motors |
+| `training/utils/workspace_projection.py` | UMI frame to robot canonical frame transform |
+| `training/scripts/process_demo.py` | MCAP to HuggingFace LeRobot dataset |
+| `training/scripts/bag_chunker.py` | Session bag to per-episode bags |
+| `inference/server_inference.py` | ZMQ server; runs ACTPolicy on GPU |
+| `inference/robot_inference.py` | Robot-side ZMQ bridge; streams ROS2 sensors and executes joint commands |
 | `src/vtam_core/nodes/record_node.py` | ROS2 recording node; manages session bags and episode markers |
 | `src/vtam_core/drivers/eflesh_node.py` | eFlesh tactile sensor serial driver |
 | `src/vtam_core/drivers/umi_detector_node.py` | ArUco cube pose estimator |

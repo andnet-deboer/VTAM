@@ -39,23 +39,23 @@ The dataset is pushed automatically after processing. Training then pulls direct
 
 ```
 data/
-├── raw/                        # Session MCAP bags recorded on the robot
-│   └── <task>/
-│       └── session_<timestamp>/
-│           └── *.mcap
-├── chunked/                    # Per-episode bags (output of bag_chunker.py)
-│   └── <task>/
-│       ├── episode_000.mcap
-│       ├── episode_001.mcap
-│       └── ...
-├── processed/                  # Episodes staged for process_demo.py
-│   └── <task>/
-│       └── *.mcap
-└── lerobot/                    # HuggingFace datasets (output of process_demo.py)
-    └── <task>/
-        ├── data/
-        ├── meta_data/
-        └── videos/
+  raw/                          # Session MCAP bags recorded on the robot
+    <task>/
+      session_<timestamp>/
+        *.mcap
+  chunked/                      # Per-episode bags (output of bag_chunker.py)
+    <task>/
+      episode_000.mcap
+      episode_001.mcap
+      ...
+  processed/                    # Episodes staged for process_demo.py
+    <task>/
+      *.mcap
+  lerobot/                      # HuggingFace datasets (output of process_demo.py)
+    <task>/
+      data/
+      meta_data/
+      videos/
 ```
 
 See `training/README.md` for the full pipeline.

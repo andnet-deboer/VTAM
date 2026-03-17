@@ -9,8 +9,8 @@ VTAM is a UMI-style imitation learning platform for the Hello Robot Stretch 3. I
 ## System Overview
 
 ```
-Record (robot)  →  Chunk  →  Process  →  Train  →  Infer (robot + GPU)
-   MCAP bags       episodes   HF dataset   policy     ZMQ pipeline
+Record (robot)   Chunk      Process      Train      Infer (robot + GPU)
+MCAP bags        episodes   HF dataset   policy     ZMQ pipeline
 ```
 
 | Stage | Tool | Output |
@@ -19,7 +19,7 @@ Record (robot)  →  Chunk  →  Process  →  Train  →  Infer (robot + GPU)
 | Chunk | `bag_chunker.py` | `data/processed/<task>/episode_*.mcap` |
 | Process | `process_demo.py` | `data/lerobot/<task>/` (HuggingFace) |
 | Train | `lerobot/scripts/train.py` | `outputs/train/*/checkpoints/` |
-| Infer | `vtam_server_inference.py` + `vtam_robot_node.py` | live robot control |
+| Infer | `server_inference.py` + `robot_inference.py` + `run.py` | live robot control |
 
 ## Action Space (8D)
 
@@ -29,4 +29,4 @@ Record (robot)  →  Chunk  →  Process  →  Train  →  Infer (robot + GPU)
 | `qx, qy, qz, qw` | 4 | EE orientation as XYZW quaternion |
 | `gripper` | 1 | Normalised gripper width [0, 1] |
 
-Actions are stored as **relative deltas (Δq)** so the policy is invariant to robot starting configuration.
+Actions are stored as relative deltas so the policy is invariant to robot starting configuration.

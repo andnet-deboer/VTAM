@@ -35,7 +35,7 @@ ros2 launch vtam_core vtam_record.launch.py
 | `umi_gripper_node` | `nodes/umi_gripper_node.py` | Publishes normalised gripper width |
 | `head_tracker_node` | `nodes/head_tracker_node.py` | Head camera pose tracking |
 | `eflesh_node` | `drivers/eflesh_node.py` | eFlesh tactile sensor serial driver (30D) |
-| `umi_detector_node` | `drivers/umi_detector_node.py` | ArUco cube pose estimator → `/umi_cube_pose` |
+| `umi_detector_node` | `drivers/umi_detector_node.py` | ArUco cube pose estimator, publishes `/umi_cube_pose` |
 
 ### Recording Services
 
