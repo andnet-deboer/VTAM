@@ -5,8 +5,8 @@ End-to-end pipeline: robot recording → dataset → policy.
 ```
 data/raw/<task>/session_<timestamp>.mcap
     └─ bag_chunker.py
-data/processed/<task>/episode_000.mcap  episode_001.mcap  ...
-    └─ process_demo.py
+data/chunked/<task>/episode_000.mcap  episode_001.mcap  ...
+    └─ process_demo.py  (reads from data/processed/<task>/)
 data/lerobot/<task>/                        (HuggingFace dataset)
     └─ lerobot/scripts/train.py
 dependencies/lerobot/outputs/train/*/checkpoints/
