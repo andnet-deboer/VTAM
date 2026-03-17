@@ -10,7 +10,7 @@
 
 A UMI-style imitation learning platform for the Hello Robot Stretch 3. VTAM records teleoperated demonstrations with synchronized RGB, joint, and tactile ([eFlesh](https://github.com/notvenky/eFlesh)) sensor data, processes them into training datasets, and deploys learned policies via a distributed ZMQ inference pipeline.
 
-This project builds on [UMI](https://umi-gripper.github.io),  [stretch_ai](https://tonyzhaozh.github.io/aloha/), and [eFlesh](https://github.com/notvenky/eFlesh). See [Citations](#citations) below.
+This project builds on [UMI](https://umi-gripper.github.io),  [stretch_ai](https://github.com/hello-robot/stretch_ai), and [eFlesh](https://github.com/notvenky/eFlesh). See [Citations](#citations) below.
 
 ---
 
