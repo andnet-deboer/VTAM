@@ -4,8 +4,9 @@ from control_msgs.action import FollowJointTrajectory
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from rclpy.action import ActionClient
 from builtin_interfaces.msg import Duration
-import zmq, pickle, cv2, numpy as np
+import zmq, pickle, cv2, numpy as np, math
 from sensor_msgs.msg import Image, JointState
+from nav_msgs.msg import Odometry
 from cv_bridge import CvBridge
 from geometry_msgs.msg import Twist
 
@@ -15,7 +16,9 @@ JOINT_NAMES = [
     'joint_gripper_finger_left'
 ]
 
-# Match HelloStretchIdx — consumed by replay_demo.py seed_from_robot_state()
+# Consumed by replay_demo.py seed_from_robot_state()
+# Indices: 0=base_x, 1=base_y, 2=base_theta, 3=lift, 4=arm_l0,
+#          5=gripper_finger_right, 6=wrist_roll, 7=wrist_pitch, 8=wrist_yaw
 ORDERED_JOINTS = [
     'base_x', 'base_y', 'base_theta',
     'joint_lift', 'joint_arm_l0',
@@ -30,6 +33,8 @@ class VTAMRobotNode(Node):
 
         self.img = None
         self.joints = {}
+        self.base_x = 0.0
+        self.base_theta = 0.0
         self.step = 0
 
         self.ctx = zmq.Context()
@@ -55,10 +60,11 @@ class VTAMRobotNode(Node):
 
         self.create_subscription(Image, '/gripper_camera/color/image_rect_raw', self.img_cb, 10)
         self.create_subscription(JointState, '/joint_states', self.joint_cb, 10)
+        self.create_subscription(Odometry, '/odom', self.odom_cb, 10)
 
         self.create_timer(1/30.0, self.publish_cycle)
         self.create_timer(1/100.0, self.check_actions)
-        self.get_logger().info("--- VTAM Robot Node Ready ---")
+        self.get_logger().info("--- VTAM Robot Node Ready (with odometry) ---")
 
     def img_cb(self, msg):
         try:
@@ -71,6 +77,13 @@ class VTAMRobotNode(Node):
             self.joints = dict(zip(msg.name, msg.position))
         except Exception as e:
             self.get_logger().error(f"joint_cb: {e}")
+
+    def odom_cb(self, msg):
+        self.base_x = msg.pose.pose.position.x
+        q = msg.pose.pose.orientation
+        siny = 2.0 * (q.w * q.z + q.x * q.y)
+        cosy = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        self.base_theta = math.atan2(siny, cosy)
 
     def publish_cycle(self):
         if self.img is None:
@@ -88,9 +101,18 @@ class VTAMRobotNode(Node):
             "joint": self.joints,
         }
 
-        robot_config = np.array(
-            [self.joints.get(j, 0.0) for j in ORDERED_JOINTS], dtype=np.float32
-        )
+        robot_config = np.array([
+            self.base_x,                                          # index 0
+            0.0,                                                  # index 1 (base_y, unused)
+            self.base_theta,                                      # index 2
+            self.joints.get('joint_lift', 0.0),                   # index 3
+            self.joints.get('joint_arm_l0', 0.0),                 # index 4
+            self.joints.get('joint_gripper_finger_right', 0.0),   # index 5
+            self.joints.get('joint_wrist_roll', 0.0),             # index 6
+            self.joints.get('joint_wrist_pitch', 0.0),            # index 7
+            self.joints.get('joint_wrist_yaw', 0.0),              # index 8
+        ], dtype=np.float32)
+
         state_msg = {
             "joint_positions": robot_config.tolist(),
         }
@@ -102,7 +124,7 @@ class VTAMRobotNode(Node):
             self.get_logger().error(f"ZMQ send error: {e}")
 
         if self.step % 30 == 0:
-            self.get_logger().info(f"Step {self.step} published OK")
+            self.get_logger().info(f"Step {self.step} odom: x={self.base_x:.4f} theta={self.base_theta:.4f}")
         self.step += 1
 
     def check_actions(self):
@@ -134,7 +156,7 @@ class VTAMRobotNode(Node):
             self.get_logger().warn(f"Unexpected action length: {len(targets)}")
             return
 
-        # Base velocity
+        # Base velocity — dampened to prevent overshoot
         t = Twist()
         t.linear.x = float(targets[0])
         t.angular.z = float(targets[2])

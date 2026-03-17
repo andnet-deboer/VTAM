@@ -29,12 +29,12 @@ DEMO_POSE = np.array([
     0.0,    # base_x vel — no base motion
     0.0,    # base_y
     0.0,    # base_theta vel — no base motion
-    0.86,   # lift
+    0.865,   # lift
     0.08,   # arm extension
     0.0,    # wrist_roll
     -0.04,    # wrist_pitch — flat/horizontal
     0.0,    # wrist_yaw
-    0.83,    # gripper — open
+    1.05,    # gripper — open
 ], dtype=np.float32)
 
 def main():

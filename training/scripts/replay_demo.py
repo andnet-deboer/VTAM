@@ -37,6 +37,7 @@ import time
 import pickle
 import numpy as np
 import zmq
+import cv2
 from pathlib import Path
 from scipy.spatial.transform import Rotation
 
@@ -69,6 +70,9 @@ TF_CHAIN = [("base_link", "umi_disconnect"), ("umi_disconnect", "umi_gripper")]
 WARN_POS_ERROR_M   = 0.03
 WARN_ORI_ERROR_RAD = 0.2
 ZMQ_TIMEOUT_MS     = 3000
+
+# ── Diagnostics directory ─────────────────────────────────────────────────────
+DIAG_DIR = "/tmp/vtam_diag"
 
 
 def normalized_to_hardware(normalized: float) -> float:
@@ -183,6 +187,9 @@ class OnlineIK(TrajectoryRetargeter):
         super().__init__(urdf_path)
         self.q_current = self.neutral_q.copy()
 
+    def _dynamic_weights(self, q_current, target_pos):
+        return self.joint_weights.copy()
+
     def seed_from_robot_state(self, state: dict, silent: bool = False):
         jp = state.get("joint_positions", None)
         if jp is None or len(jp) < 9:
@@ -191,8 +198,8 @@ class OnlineIK(TrajectoryRetargeter):
             return
 
         self.q_current = np.array([
-            jp[2],     # base_theta  → base_rotation
-            jp[0],     # base_x      → base_translation
+            jp[2],     # base_theta
+            jp[0],     # base_x
             jp[3],     # joint_lift
             jp[4] * 4, # joint_arm_l0
             jp[8],     # joint_wrist_yaw
@@ -200,27 +207,26 @@ class OnlineIK(TrajectoryRetargeter):
             jp[6],     # joint_wrist_roll
         ])
         if not silent:
-            print(f"Seeded IK: lift={jp[3]:.3f} arm={jp[4]:.3f} "
-                  f"yaw={jp[8]:.3f} pitch={jp[7]:.3f} roll={jp[6]:.3f}")
+            print(f"Seeded IK: base_x={jp[0]:.4f} base_theta={jp[2]:.4f} "
+                  f"lift={jp[3]:.3f} arm={jp[4]:.3f}")
 
     def joints_to_action(self, q7: np.ndarray, gripper_norm: float,
-                         q_prev: np.ndarray, dt: float) -> np.ndarray:
-        gripper_hw       = normalized_to_hardware(gripper_norm)
-        base_linear_vel  = (q7[1] - q_prev[1]) / dt
-        base_angular_vel = (q7[0] - q_prev[0]) / dt
+                            q_prev: np.ndarray, dt: float) -> np.ndarray:
+            gripper_hw       = normalized_to_hardware(gripper_norm)
+            base_linear_vel  = (q7[1] - q_prev[1]) / dt
+            base_angular_vel = (q7[0] - q_prev[0]) / dt
 
-        return np.array([
-            base_linear_vel,
-            0.0,
-            base_angular_vel,
-            q7[2],  # lift
-            q7[3],  # arm
-            q7[6],  # wrist_roll
-            q7[5],  # wrist_pitch
-            q7[4],  # wrist_yaw
-            gripper_hw,
-        ], dtype=np.float32)
-
+            return np.array([
+                base_linear_vel,
+                0.0,
+                base_angular_vel,
+                q7[2],  # lift
+                q7[3],  # arm
+                q7[6],  # wrist_roll
+                q7[5],  # wrist_pitch
+                q7[4],  # wrist_yaw
+                gripper_hw,
+            ], dtype=np.float32)
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("mcap", type=str, nargs="?", default=None)
@@ -312,26 +318,30 @@ def main():
         action_in.setsockopt(zmq.SUBSCRIBE, b"")
         action_in.setsockopt(zmq.CONFLATE, 1)
         action_in.connect(f"tcp://{SHEEP_IP}:{ZMQ_CHUNK_PORT}")
-        
+
         # Persistent state socket for real-time robot joint reading
         state_sock = ctx.socket(zmq.SUB)
         state_sock.setsockopt(zmq.SUBSCRIBE, b"")
         state_sock.setsockopt(zmq.CONFLATE, 1)
         state_sock.setsockopt(zmq.RCVTIMEO, ZMQ_TIMEOUT_MS)
         state_sock.connect(f"tcp://{ROBOT_IP}:{ZMQ_STATE_PORT}")
-        
+
         time.sleep(0.5)
         print("Sockets ready. Waiting for actions from sheep...\n")
 
     # ── Anchor once before the main loop ──────────────────────────────────────
-    # This matches process_demo.py: everything is relative to the pose at the
-    # start of the episode/task attempt. No re-anchoring per chunk.
     cur_pos, cur_rot = ik.forward_kinematics(ik.q_current)
     T_t0_robot       = np.eye(4)
     T_t0_robot[:3, :3] = cur_rot
     T_t0_robot[:3, 3]  = cur_pos
     T_t0_robot_inv     = np.linalg.inv(T_t0_robot)
     print(f"Anchored at EE position: [{cur_pos[0]:.4f}, {cur_pos[1]:.4f}, {cur_pos[2]:.4f}]\n")
+
+    # ── Diagnostics setup ─────────────────────────────────────────────────────
+    os.makedirs(DIAG_DIR, exist_ok=True)
+    diag_log = open(os.path.join(DIAG_DIR, "diag.csv"), "w")
+    diag_log.write("step,roundtrip_ms,state_x,state_y,state_z,action_x,action_y,action_z,"
+                   "state_grip,action_grip,pos_err_mm,real_grip\n")
 
     # ── Main loop ─────────────────────────────────────────────────────────────
     pos_errors = []
@@ -348,6 +358,11 @@ def main():
     else:
         total_frames = None  # infinite
 
+    roundtrip_ms = 0.0
+    state_8d = np.zeros(8, dtype=np.float32)
+    action_8d = np.zeros(8, dtype=np.float32)
+    current_gripper = 1.1
+
     step = 0
     while True:
         if args.mode == "replay" and step >= total_frames:
@@ -356,9 +371,6 @@ def main():
         t_start = time.time()
 
         if args.mode == "replay":
-            # Replay: use episode-start-relative poses from MCAP
-            # T_ep_start_inv @ ep_mats[step+1] gives the episode-relative target
-            # Then T_t0_robot converts it to the robot's absolute frame
             T_episode_rel    = T_ep_start_inv @ ep_mats[step + 1]
             T_target         = T_t0_robot @ T_episode_rel
             target_pos       = T_target[:3, 3]
@@ -366,14 +378,16 @@ def main():
             gripper_norm     = grippers[step + 1]
 
         else:
-            # Inference: compute episode-start-relative state, send to policy,
-            # receive episode-start-relative action
+            # ── Inference ─────────────────────────────────────────────────────
             obs = pickle.loads(obs_sock.recv())
+            t_send = time.time()
 
-            # Current EE pose relative to episode-start anchor
+            # Real robot state via persistent socket
             state_from_robot = pickle.loads(state_sock.recv())
             ik.seed_from_robot_state(state_from_robot, silent=True)
             cur_pos_now, cur_rot_now = ik.forward_kinematics(ik.q_current)
+
+
             T_curr = np.eye(4)
             T_curr[:3, :3] = cur_rot_now
             T_curr[:3, 3]  = cur_pos_now
@@ -382,37 +396,85 @@ def main():
             rel_quat = Rotation.from_matrix(T_rel[:3, :3]).as_quat()
 
             live_joints = obs.get("joint", {})
-            current_gripper = live_joints.get("joint_gripper_finger_right", 1.1)
+            current_gripper = live_joints.get("joint_gripper_finger_left", 1.05)
 
             state_8d = np.concatenate([
                 rel_pos,
                 rel_quat,
                 [max(0.0, min(1.0, (1.05 - current_gripper) / 1.25))]
-            ]).astype(np.float32)
+            ]).astype(np.
+            float32)
+            if step == 0:
+                print(f"  [STATE-8D] full state: {state_8d}")
+                print(f"  [STATE-8D] quat: [{state_8d[3]:.4f}, {state_8d[4]:.4f}, {state_8d[5]:.4f}, {state_8d[6]:.4f}]")
+            if step in [14, 15, 29, 30]:
+                print(f"  [STATE-SENT step={step}] state_8d[:3]={state_8d[:3]}")
 
-            fwd_sock.send(pickle.dumps({"rgb": obs["rgb"], "state": state_8d}), flags=zmq.NOBLOCK)
+            #TODO fwd_sock.send(pickle.dumps({"rgb": obs["rgb"], "state": state_8d}), flags=zmq.NOBLOCK)
+            fwd_sock.send(pickle.dumps({"rgb": obs["rgb"], "state": state_8d, "robot_step": step}), flags=zmq.NOBLOCK)
 
-            # Receive episode-start-relative action from policy
-            action_8d        = pickle.loads(action_in.recv())
+            # Receive action from sheep
+            action_8d = pickle.loads(action_in.recv())
+            
+            raw_delta = action_8d[:3].copy()
+            action_8d[0] = raw_delta[2]   # robot_X ← umi_Z
+            action_8d[1] = raw_delta[0]   # robot_Y ← umi_X  
+            action_8d[2] = raw_delta[1]   # robot_Z ← umi_Y
+            t_recv = time.time()
+            roundtrip_ms = (t_recv - t_send) * 1000
+
+            # ── DIAG: save camera frames every 20 steps ──────────────────────
+            if step % 20 == 0:
+                try:
+                    arr = np.frombuffer(obs["rgb"], np.uint8)
+                    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                    if img is not None:
+                        cv2.imwrite(os.path.join(DIAG_DIR, f"frame_{step:04d}.jpg"), img)
+                    else:
+                        print(f"  [DIAG] WARNING: could not decode image at step {step}")
+                except Exception as e:
+                    print(f"  [DIAG] WARNING: image save failed: {e}")
+
+            # ── DIAG: print timing every 10 steps ────────────────────────────
+            if step % 10 == 0:
+                print(f"  [DIAG-TIME] roundtrip={roundtrip_ms:.0f}ms")
 
             print(f"[DIAG] step={step} state_pos={state_8d[:3]} state_grip={state_8d[7]:.3f}")
             print(f"[DIAG] step={step} action_pos={action_8d[:3]} action_grip={action_8d[7]:.3f}")
             print(f"[DIAG] step={step} real_grip={current_gripper:.3f} ik_q={ik.q_current[:4]}")
+            
+            gripper_norm = float(action_8d[7])
 
-            T_action_rel     = np.eye(4)
-            T_action_rel[:3, :3] = Rotation.from_quat(action_8d[3:7]).as_matrix()
-            T_action_rel[:3, 3]  = action_8d[:3]
-            gripper_norm     = float(action_8d[7])
+            # ── DELTA IN EPISODE-RELATIVE FRAME 
+            target_rel_pos = rel_pos + action_8d[:3]
+            R_rel_curr = Rotation.from_quat(rel_quat)
+            R_delta = Rotation.from_quat(action_8d[3:7])
+            R_rel_target = R_rel_curr * R_delta
 
-            # Convert to absolute target
-            T_target    = T_t0_robot @ T_action_rel
-            target_pos  = T_target[:3, 3]
+            T_target_rel = np.eye(4)
+            T_target_rel[:3, 3] = target_rel_pos
+            T_target_rel[:3, :3] = R_rel_target.as_matrix()
+
+            T_target = T_t0_robot @ T_target_rel
+            target_pos = T_target[:3, 3]
             target_quat = Rotation.from_matrix(T_target[:3, :3]).as_quat()
 
         # ── IK ─────────────────────────────────
         q_prev = ik.q_current.copy()
-        q_new, pos_err, ori_err = ik.step_ik(ik.q_current, target_pos, target_quat)
+        q = ik.q_current.copy()
+        for _ in range(20):
+            q_new, pos_err, ori_err = ik.step_ik(q, target_pos, target_quat)
+            if pos_err < 0.001 and ori_err < 0.001:
+                break
+            q = q_new
         ik.q_current = q_new
+
+        # ── DIAG: base joint analysis ──────────────────────────
+        if step < 10:
+            print(f"  [BASE-DIAG] q_prev base: rot={q_prev[0]:.6f} trans={q_prev[1]:.6f}")
+            print(f"  [BASE-DIAG] q_new  base: rot={q_new[0]:.6f} trans={q_new[1]:.6f}")
+            print(f"  [BASE-DIAG] delta:       rot={q_new[0]-q_prev[0]:.6f} trans={q_new[1]-q_prev[1]:.6f}")
+            print(f"  [BASE-DIAG] velocity:    lin={(q_new[1]-q_prev[1])/dt:.4f} ang={(q_new[0]-q_prev[0])/dt:.4f}")
 
         action_9d = ik.joints_to_action(q_new, gripper_norm, q_prev, dt)
 
@@ -442,6 +504,14 @@ def main():
 
         send_action(action_sock, action_9d, dry_run=args.dry_run)
 
+        # ── DIAG: CSV log ─────────────────────────────────────────────────────
+        diag_log.write(f"{step},{roundtrip_ms:.1f},"
+                       f"{state_8d[0]:.6f},{state_8d[1]:.6f},{state_8d[2]:.6f},"
+                       f"{action_8d[0]:.6f},{action_8d[1]:.6f},{action_8d[2]:.6f},"
+                       f"{state_8d[7]:.4f},{action_8d[7]:.4f},"
+                       f"{pos_err*1000:.1f},{current_gripper:.4f}\n")
+        diag_log.flush()
+
         elapsed = time.time() - t_start
         sleep_t = dt - elapsed
         if sleep_t > 0:
@@ -450,6 +520,10 @@ def main():
             print(f"  WARNING: Frame {step} took {elapsed*1000:.0f}ms (target {dt*1000:.0f}ms)")
 
         step += 1
+
+    # ── Cleanup ───────────────────────────────────────────────────────────────
+    diag_log.close()
+    print(f"\nDiagnostics saved to {DIAG_DIR}/")
 
     if args.mode == "replay":
         print("\n" + "=" * 60)

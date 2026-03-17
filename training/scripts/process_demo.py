@@ -138,14 +138,30 @@ def process_episode(mcap_path, use_tactile=False):
 
     actions_rel = []
     states_rel = []
+    # Compute all episode-relative poses first
+    poses_rel = []
     for i in range(len(ee_mats)):
         T_rel = T_start_inv @ ee_mats[i]
         pos = T_rel[:3, 3]
         quat = Rotation.from_matrix(T_rel[:3, :3]).as_quat()
-        pose_rel = np.concatenate([pos, quat]).astype(np.float32)
-        actions_rel.append(pose_rel)
-        states_rel.append(pose_rel)
+        poses_rel.append(np.concatenate([pos, quat]).astype(np.float32))
 
+    for i in range(len(poses_rel)):
+        # State stays absolute (episode-relative)
+        states_rel.append(poses_rel[i])
+        
+        # Action is delta: next_pose - current_pose
+        if i < len(poses_rel) - 1:
+            delta_pos = poses_rel[i+1][:3] - poses_rel[i][:3]
+            # For quaternion delta, compute relative rotation
+            R_curr = Rotation.from_quat(poses_rel[i][3:7])
+            R_next = Rotation.from_quat(poses_rel[i+1][3:7])
+            R_delta = R_curr.inv() * R_next
+            delta_quat = R_delta.as_quat()
+            actions_rel.append(np.concatenate([delta_pos, delta_quat]).astype(np.float32))
+        else:
+            # Last frame: zero delta
+            actions_rel.append(np.concatenate([np.zeros(3), np.array([0, 0, 0, 1])]).astype(np.float32))
     ep = {
         'images': [PILImage.fromarray(img) for img in imgs],
         'action': np.concatenate([np.array(actions_rel, np.float32), np.array(grips, np.float32)[:, None]], axis=1),
