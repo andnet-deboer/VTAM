@@ -8,7 +8,7 @@
 
 </div>
 
-A UMI-style imitation learning platform for the Hello Robot Stretch 3. VTAM records teleoperated demonstrations with synchronized RGB, joint, and tactile (eFlesh) sensor data, processes them into training datasets, and deploys learned policies via a distributed ZMQ inference pipeline.
+A UMI-style imitation learning platform for the Hello Robot Stretch 3. VTAM records teleoperated demonstrations with synchronized RGB, joint, and tactile ([eFlesh](https://github.com/notvenky/eFlesh)) sensor data, processes them into training datasets, and deploys learned policies via a distributed ZMQ inference pipeline.
 
 This project builds directly on [UMI](https://umi-gripper.github.io), [ACT](https://tonyzhaozh.github.io/aloha/), [Diffusion Policy](https://diffusion-policy.cs.columbia.edu), and [eFlesh](https://github.com/notvenky/eFlesh). See [Citations](#citations) below.
 
@@ -105,6 +105,16 @@ python3 inference/vtam_server_inference.py --policy-path /path/to/pretrained_mod
 
 If you use this project, please also cite the works it builds on:
 
+**eFlesh**
+```bibtex
+@article{pattabiraman2025eflesh,
+    title={eFlesh: Highly customizable Magnetic Touch Sensing using Cut-Cell Microstructures},
+    author={Venkatesh Pattabiraman and Zizhou Huang and Daniele Panozzo and Denis Zorin and Lerrel Pinto and Raunaq Bhirangi},
+    journal={arXiv preprint arXiv:2506.09994},
+    year={2025}
+}
+```
+
 **UMI**
 ```bibtex
 @inproceedings{chi2024universal,
@@ -138,13 +148,3 @@ If you use this project, please also cite the works it builds on:
 }
 ```
 
-**eFlesh**
-```bibtex
-@inproceedings{feng2025learning,
-    title={Learning Unified Static-Dynamic Representation across Multiple Visuo-tactile Sensors},
-    author={Ruoxuan Feng and Jiangyu Hu and Wenke Xia and Tianci Gao and Ao Shen and Yuhao Sun and Bin Fang and Di Hu},
-    booktitle={The Thirteenth International Conference on Learning Representations},
-    year={2025},
-    url={https://openreview.net/forum?id=XToAemis1h}
-}
-```
