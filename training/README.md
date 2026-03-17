@@ -6,7 +6,9 @@ End-to-end pipeline: robot recording to dataset to policy.
 data/raw/<task>/session_<timestamp>.mcap
     bag_chunker.py
 data/chunked/<task>/episode_000.mcap  episode_001.mcap  ...
-    process_demo.py  (reads from data/processed/<task>/)
+    detect_umi.py
+data/processed/<task>/episode_000.mcap  episode_001.mcap  ...
+    process_demo.py
 data/lerobot/<task>/                        (HuggingFace dataset)
     lerobot/scripts/train.py
 dependencies/lerobot/outputs/train/*/checkpoints/
@@ -38,14 +40,24 @@ python3 training/scripts/bag_chunker.py <task> --session session_20260303_230109
 
 ---
 
-## Step 3 — Process
+## Step 3 — Detect UMI
+
+Run offline AprilTag detection on each chunked episode. Reads `/tf_static` and live `/tf` from the bag to transform the detected cube pose into `base_link` frame, and writes `umi_disconnect` and `umi_gripper` TF frames into new bags in `data/processed/`.
+
+```bash
+python3 training/scripts/detect_umi.py <task>
+```
+
+---
+
+## Step 4 — Process
 
 Login to HuggingFace first:
 ```bash
 uvx hf auth login
 ```
 
-Extract EE poses from `/tf`, run workspace projection, build LeRobot dataset:
+Extract EE poses from `/tf`, build LeRobot dataset:
 
 **With tactile** (includes 30D eFlesh observations):
 ```bash
@@ -63,9 +75,8 @@ python3 training/scripts/process_demo.py <task> \
     --push-to-hub
 ```
 
-What this does:
-- Extracts UMI hand pose from `/tf` at each camera frame timestamp
-- Calls `workspace_projection.project()` to get canonical EE pose (N, 7)
+Reads from `data/processed/<task>/` (output of `detect_umi.py`). What this does:
+- Extracts UMI hand pose from `/tf` at each camera frame timestamp to get canonical EE pose (N, 7)
 - Extracts `/gripper_width_normalized` (N,)
 - Extracts `/camera_arm` images (N, 320, 320, 3)
 - Computes progress token (0 to 1) per episode
@@ -73,7 +84,7 @@ What this does:
 
 ---
 
-## Step 4 — Train
+## Step 5 — Train
 
 ```bash
 cd dependencies/lerobot
@@ -111,7 +122,7 @@ Actions are relative deltas, invariant to robot starting configuration. Progress
 | `scripts/process_demo.py` | Episode bags to HuggingFace LeRobot dataset |
 | `inference/run.py` | Replay a recorded trajectory or run live policy inference on the robot |
 | `scripts/validate_demos.py` | Validate episode integrity |
-| `scripts/detect_umi.py` | UMI hand detection utility |
+| `scripts/detect_umi.py` | Offline AprilTag detection: chunked bags to processed bags with UMI TF injected |
 | `scripts/fuse_imu.py` | IMU sensor fusion |
 | `scripts/goto_demo_pose.py` | Move robot to neutral demo pose |
 
@@ -121,6 +132,5 @@ Actions are relative deltas, invariant to robot starting configuration. Progress
 |--------|---------|
 | `utils/differential_ik.py` | Jacobian-based 6-DOF IK (damped least-squares); used at inference |
 | `utils/kinematics.py` | Analytical IK for trajectory seeding |
-| `utils/workspace_projection.py` | UMI frame to robot canonical frame transform |
 | `utils/visualize_ik.py` | Visualise IK results |
 | `utils/stretch_omni_mobile_ik.urdf` | 7-DOF URDF for pinocchio |

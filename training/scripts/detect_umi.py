@@ -149,7 +149,7 @@ def chain_static_tf(static_tfs, from_frame, to_frame):
 
 # Core Processing 
 
-def process_episode(in_path, out_path, marker_info, args):
+def process_episode(in_path, out_path, marker_info, args, global_static_tfs=None):
     K, D, sync_ns, imgs = None, None, [], []
     tf_pan_raw, tf_pan_ts, tf_tilt_raw, tf_tilt_ts = [], [], [], []
     pan_parent_frame, cam_frame = None, None
@@ -181,10 +181,16 @@ def process_episode(in_path, out_path, marker_info, args):
     pan_data, pan_ts = np.array(tf_pan_raw), np.array(tf_pan_ts)
     tilt_data, tilt_ts = np.array(tf_tilt_raw), np.array(tf_tilt_ts)
 
-    # Build TF chain from bag's /tf_static
+    # Build TF chain: per-episode /tf_static merged with global (handles sessions where stretch_driver
+    # published /tf_static before bag recording started and only camera-internal republishes were captured)
     static_tfs = load_static_tfs(in_path)
-    t_bh, R_bh = chain_static_tf(static_tfs, 'base_link', pan_parent_frame)
-    t_tc, R_tc = chain_static_tf(static_tfs, 'link_head_tilt', cam_frame)
+    if global_static_tfs:
+        merged = dict(global_static_tfs)
+        merged.update(static_tfs)  # per-episode takes priority
+    else:
+        merged = static_tfs
+    t_bh, R_bh = chain_static_tf(merged, 'base_link', pan_parent_frame)
+    t_tc, R_tc = chain_static_tf(merged, 'link_head_tilt', cam_frame)
     if t_bh is None or t_tc is None:
         raise RuntimeError(f"Static TF chain lookup failed (pan_parent={pan_parent_frame}, cam={cam_frame}) — is /tf_static recorded in the bag?")
 
@@ -266,10 +272,17 @@ def main():
 
     with open(MARKER_YAML, 'r') as f: marker_info = yaml.safe_load(f)
     paths = sorted(glob.glob(os.path.expanduser(f"~/VTAM/data/chunked/{args.demo_name}/*.mcap")))
+
+    # Pre-collect /tf_static from all episodes and merge. Handles the case where stretch_driver
+    # published its full robot TF before some session bags started recording.
+    global_static_tfs = {}
+    for p in paths:
+        global_static_tfs.update(load_static_tfs(p))
+
     for p in paths:
         out = p.replace('chunked', 'processed')
         os.makedirs(os.path.dirname(out), exist_ok=True)
         print(f"Processing {os.path.basename(p)}...")
-        process_episode(p, out, marker_info, args)
+        process_episode(p, out, marker_info, args, global_static_tfs=global_static_tfs)
 
 if __name__ == '__main__': main()

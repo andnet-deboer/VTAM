@@ -124,6 +124,14 @@ def chunk_bag(bag_path: str, output_dir: str, episode_offset: int = 0) -> int:
             progress_maps.append({ts: float(j) / max(N - 1, 1) for j, ts in enumerate(sync_timestamps)})
             valid_episodes.append(True)
 
+    # Collect all /tf_static messages (published before episode starts, need to copy into each episode)
+    static_tf_messages = []
+    if '/tf_static' in channel_meta:
+        with open(mcap_path, "rb") as f:
+            reader = make_reader(f)
+            for schema, channel, message in reader.iter_messages(topics=['/tf_static']):
+                static_tf_messages.append(message.data)
+
     # Pass 2: single stream, write all episodes simultaneously
     out_files = []
     writers = []
@@ -148,6 +156,11 @@ def chunk_bag(bag_path: str, output_dir: str, episode_offset: int = 0) -> int:
             sid = writer.register_schema(name=schema.name, encoding=schema.encoding, data=schema.data)
             cid = writer.register_channel(topic=topic, message_encoding=channel.message_encoding, schema_id=sid, metadata=dict(channel.metadata))
             channel_ids[topic] = cid
+
+        # Inject /tf_static messages at episode start so detect_umi.py can find them
+        if static_tf_messages and '/tf_static' in channel_ids:
+            for data in static_tf_messages:
+                writer.add_message(channel_id=channel_ids['/tf_static'], log_time=start_ns, data=data, publish_time=start_ns)
 
         progress_schema_id = writer.register_schema(name="std_msgs/msg/Float32", encoding="ros2msg", data=b"float32 data\n")
         progress_channel_id = writer.register_channel(topic="/progress", message_encoding="cdr", schema_id=progress_schema_id)

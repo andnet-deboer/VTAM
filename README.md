@@ -14,6 +14,8 @@ This project builds on [UMI](https://umi-gripper.github.io),  [stretch_ai](https
 
 ---
 
+![alt text](image.png)
+
 ## Setup
 
 ### Install UV
