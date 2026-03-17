@@ -60,3 +60,7 @@ source .venv/bin/activate
 sudo ufw allow 4405
 sudo ufw allow 4406
 ```
+
+## Credits
+
+The ZMQ-based distributed inference pipeline: streaming observations from the robot to a GPU machine over the network and sending actions back — is  adapted from [Stretch AI](https://github.com/hello-robot/stretch_ai) by Hello Robot. The two-machine architecture, socket patterns, and ROS2 bridge approach in `robot_inference.py` are a modified version of their work. See their repository for the original implementation and broader set of Stretch 3 intelligent behaviors.
