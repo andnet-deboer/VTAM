@@ -1,5 +1,7 @@
 # VTAM Inference
 
+> Adapted from [Stretch AI](https://github.com/hello-robot/stretch_ai) by Hello Robot. The distributed ZMQ inference architecture is a modified version of their work.
+
 Three-process pipeline across two machines.
 
 ## Architecture
