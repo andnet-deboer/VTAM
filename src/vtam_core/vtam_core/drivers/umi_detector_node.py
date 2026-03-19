@@ -140,26 +140,20 @@ class UmiDetectorNode(Node):
         self.quat_filter = OneEuroFilter(30.0, self.get_parameter('quat_min_cutoff').value, self.get_parameter('quat_beta').value)
         self.add_on_set_parameters_callback(self.param_cb)
 
-        # TODO
-        # self.dictionary = aruco.getPredefinedDictionary(aruco.DICT_APRILTAG_36h11)
-        # self.detector = aruco.ArucoDetector(self.dictionary, aruco.DetectorParameters())
-
         self.dictionary = aruco.getPredefinedDictionary(aruco.DICT_APRILTAG_36h11)
         
         # Configure detector parameters for better AprilTag accuracy on compressed images
         params = aruco.DetectorParameters()
         
-        # Turn on Subpixel Refinement to defeat JPEG artifacts and edge blur
+        # Turn on Subpixel Refinement
         params.cornerRefinementMethod = aruco.CORNER_REFINE_SUBPIX
         
-        # (Optional) Make the thresholding more forgiving for lighting changes
         params.adaptiveThreshWinSizeMin = 3
         params.adaptiveThreshWinSizeMax = 23
         params.adaptiveThreshWinSizeStep = 10
         
         # Pass the custom params to the detector
         self.detector = aruco.ArucoDetector(self.dictionary, params)
-        ## End TODO
 
         self.collection, self.camera_info_dict, self.prev_cube_pose = {}, None, None
         
