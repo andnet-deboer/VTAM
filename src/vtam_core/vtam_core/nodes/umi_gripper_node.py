@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Gripper Controller
-Commands gripper via stretch_driver's action server instead of direct hardware.
+Commands gripper via stretch_driver's action server.
 """
 
 import numpy as np
