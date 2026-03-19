@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-UMI Cube Tracker - BASE_LINK ALIGNED VERSION
+UMI Cube Tracker
 """
 
 import cv2
