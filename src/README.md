@@ -12,11 +12,6 @@ colcon build --packages-select vtam_core
 source install/setup.bash
 ```
 
-Requires `libvisp-dev` for ArUco detection:
-```bash
-sudo apt update && sudo apt install -y libvisp-dev
-```
-
 ### Launch
 
 ```bash
