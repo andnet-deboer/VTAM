@@ -43,7 +43,7 @@ All three must be running before `run.py`:
 
 2. **vtam_robot_node** — reads `/joint_states`, camera; bridges to ZMQ
    ```bash
-   python3 inference/robot_inference.py
+   ros2 run vtam_core vtam_robot_node   # or python3 inference/robot_inference.py
    ```
 
 3. **TeleTool2 on iPhone** — connected to this machine's IP on port 8080
