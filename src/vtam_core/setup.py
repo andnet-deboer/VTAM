@@ -37,6 +37,7 @@ setup(
             'cv_tracker = vtam_core.cv_tracker:main',
             'imu_calibration_helper = vtam_core.nodes.imu_helper:main',
             'head_tracker_node = vtam_core.nodes.head_tracker_node:main',
+            'teleop_receiver_node = vtam_core.nodes.teleop_receiver_node:main',
 
             # Debug nodes
             'tactile_viz_node = vtam_core.debug.viz_node:main',
