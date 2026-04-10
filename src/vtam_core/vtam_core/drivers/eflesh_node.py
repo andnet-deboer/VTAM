@@ -19,10 +19,9 @@ class SkinSerialReader:
         self.num_mags = num_mags
         self.has_button = has_button
         self.has_imu = has_imu
-        self.imu_size = 24 if has_imu else 0
+        self.imu_size = 16 if has_imu else 0  # 4 floats (w,x,y,z) = 16 bytes
         self.mag_frame_size = num_mags * 16
-        self.total_frame_size = self.mag_frame_size + (1 if has_button else 0) + self.imu_size
-
+        self.total_frame_size = self.mag_frame_size + self.imu_size + (1 if has_button else 0)
         self.ser = None
         self.available = False 
         try:
@@ -63,14 +62,19 @@ class SkinSerialReader:
                 while b'\r\n' in buf:
                     frame, buf = buf.split(b'\r\n', 1)
                     if len(frame) == self.total_frame_size:
+                        # 1. Parse Mags
                         sensor_bytes = frame[:self.mag_frame_size]
-                        btn = frame[self.mag_frame_size] if self.has_button else 0
                         values = struct.unpack(f'<{self.num_mags * 4}f', sensor_bytes)
 
+                        # 2. Parse IMU (if present)
                         imu_vals = None
+                        current_idx = self.mag_frame_size
                         if self.has_imu:
-                            imu_start = self.mag_frame_size + (1 if self.has_button else 0)
-                            imu_vals = struct.unpack('<6f', frame[imu_start:imu_start + 24])
+                            imu_vals = struct.unpack('<4f', frame[current_idx:current_idx + 16])
+                            current_idx += 16
+
+                        # 3. Parse Button (if present)
+                        btn = frame[current_idx] if self.has_button else 0
 
                         with self.lock:
                             self.latest_data = np.array(values)
@@ -245,30 +249,30 @@ class EFleshNode(Node):
         return dyn_baseline, raw_data
 
     def _publish_imu(self, imu_data):
-        """Pack [ax,ay,az,gx,gy,gz] into sensor_msgs/Imu and publish."""
+        """Pack [w, x, y, z] into sensor_msgs/Imu orientation and publish."""
         if imu_data is None:
             return
         msg = Imu()
         msg.header.stamp    = self.get_clock().now().to_msg()
         msg.header.frame_id = self.imu_frame_id
 
-        # Orientation unknown — signal with -1 in first diagonal element
-        msg.orientation_covariance = self.orient_cov
+        # Absolute orientation from the BNO055
+        msg.orientation.w = float(imu_data[0])
+        msg.orientation.x = float(imu_data[1])
+        msg.orientation.y = float(imu_data[2])
+        msg.orientation.z = float(imu_data[3])
 
-        msg.linear_acceleration.x = float(imu_data[0])
-        msg.linear_acceleration.y = float(imu_data[1])
-        msg.linear_acceleration.z = float(imu_data[2])
-        msg.linear_acceleration_covariance = self.accel_cov
+        # Set first element of orientation covariance to 0 to indicate valid data
+        msg.orientation_covariance = [0.0] + [0.0] * 8
 
-        msg.angular_velocity.x = float(imu_data[3])
-        msg.angular_velocity.y = float(imu_data[4])
-        msg.angular_velocity.z = float(imu_data[5])
-        msg.angular_velocity_covariance = self.gyro_cov
+        # Invalidate linear accel and angular velocity
+        msg.linear_acceleration_covariance[0] = -1.0
+        msg.angular_velocity_covariance[0] = -1.0
 
         self.pub_imu.publish(msg)
 
-    # def _imu_timer_cb(self):
-    #     self._publish_imu(self.reader.get_imu())
+    def _imu_timer_cb(self):
+        self._publish_imu(self.reader.get_imu())
 
     # ------------------------------------------------------------------ callbacks
 
@@ -276,6 +280,9 @@ class EFleshNode(Node):
         data_u, button = self.reader.get_data()
         data_l, _      = self.reader_left.get_data()
         data_r, _      = self.reader_right.get_data()
+
+        # Publish the latest IMU state synchronized with the tactile frame
+        self._publish_imu(self.reader.get_imu())
 
         self._process_static(data_u, self.baseline_umi, self.pub_umi, self.gain_umi)
 
