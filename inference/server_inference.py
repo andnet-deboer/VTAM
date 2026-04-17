@@ -13,6 +13,7 @@ Usage:
 """
 
 import os
+from pathlib import Path
 import sys
 import time
 import pickle
@@ -81,7 +82,7 @@ def main():
     print(f"{'='*55}\n")
 
     print(f"Loading policy from {args.policy_path}...")
-    policy = ACTPolicy.from_pretrained(args.policy_path, local_files_only=True)
+    policy = ACTPolicy.from_pretrained(Path(args.policy_path))
     policy.to(args.device)
     policy.eval()
 
