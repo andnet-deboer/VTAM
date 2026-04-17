@@ -29,6 +29,8 @@ Start all three processes:
 
 ### 1. Robot
 ```bash
+ros2 launch stretch_core d405_basic.launch.py serial_no:=_128422270608
+
 python3 robot_inference.py
 ```
 
