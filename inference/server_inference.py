@@ -81,7 +81,7 @@ def main():
     print(f"{'='*55}\n")
 
     print(f"Loading policy from {args.policy_path}...")
-    policy = ACTPolicy.from_pretrained(args.policy_path)
+    policy = ACTPolicy.from_pretrained(args.policy_path, local_files_only=True)
     policy.to(args.device)
     policy.eval()
 
